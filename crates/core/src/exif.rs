@@ -1,5 +1,6 @@
 //! Минимальная работа с EXIF (TIFF-структурой) без перекодирования блока:
-//! сброс ориентации (FR-2.3), удаление GPS (FR-2.2), чтение даты съёмки (FR-4.2).
+//! сброс ориентации (FR-2.3), удаление GPS (FR-2.2), чтение даты съёмки (FR-4.2),
+//! встроенная миниатюра для сравнения фото (FR-9.1).
 //!
 //! Блок правится на месте: длины и смещения не меняются, поэтому остальные теги
 //! (в т.ч. MakerNote со внутренними смещениями) остаются корректными.
@@ -8,6 +9,8 @@ const TAG_ORIENTATION: u16 = 0x0112;
 const TAG_EXIF_IFD: u16 = 0x8769;
 const TAG_GPS_IFD: u16 = 0x8825;
 const TAG_DATE_TIME_ORIGINAL: u16 = 0x9003;
+const TAG_THUMBNAIL_OFFSET: u16 = 0x0201;
+const TAG_THUMBNAIL_LENGTH: u16 = 0x0202;
 const TYPE_SHORT: u16 = 3;
 
 /// Приводит EXIF из разных контейнеров к «голому» TIFF (`II*\0…` / `MM\0*…`).
@@ -135,6 +138,21 @@ pub fn date_time_original(tiff: &[u8]) -> Option<String> {
     let raw = tiff.get(start..start + len)?;
     let s = std::str::from_utf8(raw).ok()?.trim_end_matches('\0').trim();
     (s.len() >= 19).then(|| s[..19].to_string())
+}
+
+/// Встроенная JPEG-миниатюра из IFD1 (обычно 160×120) — у снимков с телефонов и камер.
+/// Ориентация у неё та же, что у основного изображения.
+pub fn thumbnail(tiff: &[u8]) -> Option<&[u8]> {
+    let t = Tiff::new(tiff)?;
+    let ifd0 = t.ifd0()?;
+    let ifd1 = t.u32(ifd0 + 2 + t.entries(ifd0)?.len() * 12)? as usize;
+    if ifd1 == 0 {
+        return None;
+    }
+    let start = t.find(ifd1, TAG_THUMBNAIL_OFFSET)?.value as usize;
+    let len = t.find(ifd1, TAG_THUMBNAIL_LENGTH)?.value as usize;
+    let data = tiff.get(start..start.checked_add(len)?)?;
+    data.starts_with(&[0xFF, 0xD8]).then_some(data)
 }
 
 /// Ставит Orientation = 1. Возвращает `false`, если блок не удалось разобрать.
@@ -274,6 +292,34 @@ mod tests {
                 date_time_original(&d).as_deref(),
                 Some("2024:05:17 10:20:30")
             );
+        }
+    }
+
+    #[test]
+    fn finds_thumbnail_in_ifd1() {
+        for le in [true, false] {
+            let w16 = |v: u16| if le { v.to_le_bytes() } else { v.to_be_bytes() };
+            let w32 = |v: u32| if le { v.to_le_bytes() } else { v.to_be_bytes() };
+            let mut d = sample(le);
+            assert_eq!(thumbnail(&d), None, "без IFD1");
+            // Указатель на IFD1 — после записей IFD0 (8 + 2 + 3×12).
+            let ifd1 = d.len() as u32;
+            d[46..50].copy_from_slice(&w32(ifd1));
+            let jpeg_at = ifd1 + 2 + 2 * 12 + 4;
+            d.extend_from_slice(&w16(2));
+            for (tag, value) in [(TAG_THUMBNAIL_OFFSET, jpeg_at), (TAG_THUMBNAIL_LENGTH, 4)] {
+                d.extend_from_slice(&w16(tag));
+                d.extend_from_slice(&w16(4));
+                d.extend_from_slice(&w32(1));
+                d.extend_from_slice(&w32(value));
+            }
+            d.extend_from_slice(&w32(0));
+            d.extend_from_slice(&[0xFF, 0xD8, 0xFF, 0xD9]);
+            assert_eq!(thumbnail(&d), Some(&[0xFF, 0xD8, 0xFF, 0xD9][..]));
+            // Обрезанный блок — без паники.
+            for cut in [50, 60, d.len() - 2] {
+                assert_eq!(thumbnail(&d[..cut]), None);
+            }
         }
     }
 

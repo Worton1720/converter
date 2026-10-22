@@ -6,6 +6,7 @@ use ::image::{DynamicImage, ImageDecoder, ImageReader, RgbImage, RgbaImage};
 use libheif_rs::{ColorSpace, HeifContext, LibHeif, RgbChroma};
 
 use crate::error::{Error, IoContext, Result};
+use crate::exif;
 use crate::ffmpeg::{self, Tools};
 use crate::media::{ImageKind, MediaKind};
 use crate::paths;
@@ -55,13 +56,51 @@ pub fn thumbnail(tools: &Tools, path: &Path, kind: MediaKind, size: u32) -> Resu
     Ok(out)
 }
 
-/// Уменьшенная картинка с применённым поворотом, без кэша — для сравнения фото (FR-9.2).
-/// HEIC — по встроенной миниатюре, если она есть: полное декодирование 24 Мп занимает ~0,7 с.
+/// Уменьшенная картинка с применённым поворотом, без кэша — для сравнения фото (FR-9.1, 9.2).
+/// HEIC и JPEG — по встроенной миниатюре, если её хватает: полное декодирование
+/// 24 Мп занимает 0,1–0,7 с, а миниатюра читается за миллисекунды.
 pub(crate) fn preview(path: &Path, kind: ImageKind, size: u32) -> Result<DynamicImage> {
     match kind {
         ImageKind::Heif => heif_preview(path, size),
+        ImageKind::Jpeg if size <= EXIF_THUMB_SIDE => match exif_preview(path) {
+            Some(img) => Ok(img),
+            None => generic_preview(path),
+        },
         _ => generic_preview(path),
     }
+}
+
+/// Сторона EXIF-миниатюры JPEG (обычно 160×120): для превью больше неё она не годится.
+const EXIF_THUMB_SIDE: u32 = 160;
+
+/// Миниатюра из EXIF JPEG с поворотом основного изображения. `None`, если её нет или её
+/// пропорции не совпадают со снимком: после поворота или обрезки в редакторе она бывает
+/// устаревшей, и сравнение по ней дало бы чужой отпечаток.
+fn exif_preview(path: &Path) -> Option<DynamicImage> {
+    let mut decoder = ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .into_decoder()
+        .ok()?;
+    let (w, h) = decoder.dimensions();
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(::image::metadata::Orientation::NoTransforms);
+    let tiff = exif::normalize(&decoder.exif_metadata().ok()??)?;
+    let mut thumb =
+        ::image::load_from_memory_with_format(exif::thumbnail(&tiff)?, ::image::ImageFormat::Jpeg)
+            .ok()?;
+    let (tw, th) = (thumb.width(), thumb.height());
+    let (a, b) = (
+        f64::from(w) / f64::from(h.max(1)),
+        f64::from(tw) / f64::from(th.max(1)),
+    );
+    if (a - b).abs() > 0.03 * a {
+        return None;
+    }
+    thumb.apply_orientation(orientation);
+    Some(thumb)
 }
 
 /// Встроенная миниатюра HEIC, если её хватает по размеру; иначе основное изображение.
@@ -178,4 +217,64 @@ pub fn clear_cache() -> u64 {
         .sum();
     let _ = std::fs::remove_dir_all(dir);
     size
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// JPEG `w`×`h` со встроенной EXIF-миниатюрой `tw`×`th`.
+    fn jpeg_with_thumb(dir: &Path, (w, h): (u32, u32), (tw, th): (u32, u32)) -> PathBuf {
+        let encode = |w, h| {
+            let mut out = std::io::Cursor::new(Vec::new());
+            DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, _| {
+                ::image::Rgb([x as u8, 90, 160])
+            }))
+            .write_to(&mut out, ::image::ImageFormat::Jpeg)
+            .unwrap();
+            out.into_inner()
+        };
+        let thumb = encode(tw, th);
+        // TIFF: пустой IFD0 @8 → IFD1 @14 {смещение, длина миниатюры} → миниатюра @44.
+        let mut tiff = b"II*\0".to_vec();
+        tiff.extend_from_slice(&8u32.to_le_bytes());
+        tiff.extend_from_slice(&0u16.to_le_bytes());
+        tiff.extend_from_slice(&14u32.to_le_bytes());
+        tiff.extend_from_slice(&2u16.to_le_bytes());
+        for (tag, value) in [(0x0201u16, 44u32), (0x0202, thumb.len() as u32)] {
+            tiff.extend_from_slice(&tag.to_le_bytes());
+            tiff.extend_from_slice(&4u16.to_le_bytes());
+            tiff.extend_from_slice(&1u32.to_le_bytes());
+            tiff.extend_from_slice(&value.to_le_bytes());
+        }
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+        tiff.extend_from_slice(&thumb);
+        let mut app1 = b"Exif\0\0".to_vec();
+        app1.extend_from_slice(&tiff);
+        let main = encode(w, h);
+        let mut file = main[..2].to_vec();
+        file.extend_from_slice(&[0xFF, 0xE1]);
+        file.extend_from_slice(&((app1.len() + 2) as u16).to_be_bytes());
+        file.extend_from_slice(&app1);
+        file.extend_from_slice(&main[2..]);
+        let path = dir.join(format!("{w}x{h}-{tw}x{th}.jpg"));
+        std::fs::write(&path, file).unwrap();
+        path
+    }
+
+    #[test]
+    fn jpeg_preview_uses_exif_thumbnail_only_when_it_fits() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = jpeg_with_thumb(dir.path(), (800, 600), (160, 120));
+        let img = preview(&good, ImageKind::Jpeg, 64).unwrap();
+        assert_eq!((img.width(), img.height()), (160, 120), "взята миниатюра");
+        // Для большого превью миниатюра мала — декодируется само фото.
+        let img = preview(&good, ImageKind::Jpeg, 400).unwrap();
+        assert_eq!((img.width(), img.height()), (800, 600));
+        // Миниатюра не той ориентации (фото повернули, её — нет) — не используется.
+        let stale = jpeg_with_thumb(dir.path(), (800, 600), (120, 160));
+        assert!(exif_preview(&stale).is_none());
+        let img = preview(&stale, ImageKind::Jpeg, 64).unwrap();
+        assert_eq!((img.width(), img.height()), (800, 600));
+    }
 }
