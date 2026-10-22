@@ -266,7 +266,22 @@ mod tests {
         std::fs::create_dir(&sub).unwrap();
         let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0, 0];
         std::fs::write(sub.join("a.jpg"), jpeg).unwrap();
+        #[cfg(unix)]
         std::fs::write(dir.path().join(".hidden.jpg"), jpeg).unwrap();
+        // На Windows скрытость — атрибут файла, а не точка в имени.
+        #[cfg(windows)]
+        {
+            use std::io::Write;
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .attributes(FILE_ATTRIBUTE_HIDDEN)
+                .open(dir.path().join("hidden.jpg"))
+                .and_then(|mut f| f.write_all(&jpeg))
+                .unwrap();
+        }
         std::fs::write(dir.path().join("notes.txt"), b"hello").unwrap();
         let cancel = AtomicBool::new(false);
         let found = scan(
@@ -278,7 +293,6 @@ mod tests {
             .iter()
             .map(|i| i.path.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
-        #[cfg(unix)]
         assert_eq!(names, ["a.jpg"]);
         assert_eq!(found[0].root, canonical(dir.path()));
     }
