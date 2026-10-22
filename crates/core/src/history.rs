@@ -172,6 +172,119 @@ impl Entry {
     }
 }
 
+// ---------- «Вернуть как было» ----------
+
+/// Итог отмены: сколько вернулось и что не получилось (простыми словами).
+#[derive(Debug, Default, Serialize)]
+pub struct UndoReport {
+    /// Исходники возвращены (из корзины или из другой папки).
+    pub restored: usize,
+    /// Созданные файлы убраны в корзину.
+    pub removed: usize,
+    pub problems: Vec<(PathBuf, String)>,
+}
+
+/// Возвращает файлы как было до действия. Порядок важен для сохранности: сначала исходник
+/// возвращается на место, и только если это удалось (или он и не уходил), его результат
+/// убирается в корзину — иначе человек остался бы без обеих копий.
+pub fn undo(entry: &Entry) -> UndoReport {
+    let mut report = UndoReport::default();
+    // Корзина целиком читается один раз; у одного пути берётся последнее удаление.
+    let mut trashed: Option<Vec<trash::TrashItem>> = None;
+    for c in &entry.changes {
+        let source_back = match &c.fate {
+            Fate::Kept => true,
+            Fate::Deleted => {
+                report.problems.push((
+                    c.source.clone(),
+                    "файл был удалён навсегда — вернуть нельзя".into(),
+                ));
+                false
+            }
+            Fate::MovedTo(at) => match move_back(at, &c.source) {
+                Ok(()) => {
+                    report.restored += 1;
+                    true
+                }
+                Err(e) => {
+                    report.problems.push((c.source.clone(), e));
+                    false
+                }
+            },
+            Fate::Trashed => {
+                let items =
+                    trashed.get_or_insert_with(|| trash::os_limited::list().unwrap_or_default());
+                match restore_from_trash(items, &c.source) {
+                    Ok(()) => {
+                        report.restored += 1;
+                        true
+                    }
+                    Err(e) => {
+                        report.problems.push((c.source.clone(), e));
+                        false
+                    }
+                }
+            }
+        };
+        if let Some(out) = c.output.as_ref().filter(|_| source_back) {
+            if !out.exists() {
+                continue; // уже убран вручную
+            }
+            match crate::fs_ops::trash(out) {
+                Ok(()) => report.removed += 1,
+                Err(e) => report.problems.push((out.clone(), e.to_string())),
+            }
+        }
+    }
+    report
+}
+
+fn move_back(from: &Path, to: &Path) -> std::result::Result<(), String> {
+    if to.exists() {
+        return Err("на прежнем месте уже есть файл с таким именем".into());
+    }
+    if !from.exists() {
+        return Err("файла уже нет там, куда он был перемещён".into());
+    }
+    if let Some(dir) = to.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    if std::fs::rename(from, to).is_err() {
+        // Другой диск: копия с проверкой размера, затем удаление.
+        std::fs::copy(from, to).map_err(|e| e.to_string())?;
+        let same = std::fs::metadata(from)
+            .ok()
+            .zip(std::fs::metadata(to).ok())
+            .is_some_and(|(a, b)| a.len() == b.len());
+        if !same {
+            let _ = std::fs::remove_file(to);
+            return Err("копия не совпала по размеру".into());
+        }
+        std::fs::remove_file(from).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn restore_from_trash(
+    items: &mut Vec<trash::TrashItem>,
+    original: &Path,
+) -> std::result::Result<(), String> {
+    if original.exists() {
+        return Err("на прежнем месте уже есть файл с таким именем".into());
+    }
+    let Some(i) = items
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.original_path() == original)
+        .max_by_key(|(_, t)| t.time_deleted)
+        .map(|(i, _)| i)
+    else {
+        return Err("файла нет в корзине — возможно, её уже очистили".into());
+    };
+    let item = items.remove(i);
+    trash::os_limited::restore_all([item]).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,6 +331,45 @@ mod tests {
         };
         assert!(pending.is_empty());
         assert_eq!(*failed, 1);
+    }
+
+    #[test]
+    fn undo_moves_back_and_reports_what_cannot_return() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let original = d.join("Фото/копия.jpg");
+        let moved = d.join("Лишнее/копия.jpg");
+        std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
+        std::fs::write(&moved, b"jpeg").unwrap();
+        let entry = Entry {
+            id: 1,
+            finished_ms: Some(2),
+            action: Action::Dupes { freed: 4 },
+            changes: vec![
+                Change {
+                    source: original.clone(),
+                    output: None,
+                    fate: Fate::MovedTo(moved.clone()),
+                },
+                Change {
+                    source: d.join("удалённый.jpg"),
+                    output: None,
+                    fate: Fate::Deleted,
+                },
+            ],
+            undone: false,
+        };
+        let r = undo(&entry);
+        assert_eq!(r.restored, 1);
+        assert!(original.exists() && !moved.exists());
+        assert_eq!(r.problems.len(), 1);
+        assert!(r.problems[0].1.contains("навсегда"));
+
+        // Повторная отмена: на месте уже есть файл — не перезаписываем.
+        std::fs::write(&moved, b"other").unwrap();
+        let r = undo(&entry);
+        assert_eq!(r.restored, 0);
+        assert_eq!(std::fs::read(&original).unwrap(), b"jpeg");
     }
 
     #[test]

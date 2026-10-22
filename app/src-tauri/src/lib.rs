@@ -683,6 +683,50 @@ fn history_list(state: State<'_, AppState>) -> Vec<dto::HistoryItem> {
     h.entries.iter().rev().map(dto::HistoryItem::new).collect()
 }
 
+/// «Вернуть как было» по записи истории. Запись помечается отменённой, если что-то вернулось.
+#[tauri::command]
+async fn history_undo(id: u64, app: AppHandle) -> CmdResult<history::UndoReport> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        if state.busy() {
+            return Err("дождитесь окончания работы".to_string());
+        }
+        let entry = state
+            .history
+            .lock()
+            .unwrap()
+            .entries
+            .iter()
+            .find(|e| e.id == id)
+            .cloned()
+            .ok_or("запись не найдена")?;
+        if entry.undone {
+            return Err("уже отменено".into());
+        }
+        let report = history::undo(&entry);
+        state.log.write(
+            "INFO",
+            &format!(
+                "вернуть как было: возвращено {}, убрано результатов {}, не получилось {}",
+                report.restored,
+                report.removed,
+                report.problems.len()
+            ),
+        );
+        for (path, problem) in &report.problems {
+            state
+                .log
+                .write("WARN", &format!("{}: {problem}", path.display()));
+        }
+        if report.restored + report.removed > 0 {
+            state.with_history(id, true, |e| e.undone = true);
+        }
+        Ok(report)
+    })
+    .await
+    .map_err(err)?
+}
+
 #[tauri::command]
 fn dupes_report(state: State<'_, AppState>) -> Option<DupesResult> {
     let d = state.dupes.lock().unwrap();
@@ -935,6 +979,7 @@ pub fn run() {
             write_text_file,
             quit,
             history_list,
+            history_undo,
             update::check_update,
             update::install_update,
             devtest::dev_report,

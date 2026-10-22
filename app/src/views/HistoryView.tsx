@@ -1,11 +1,11 @@
 import { openPath } from "@tauri-apps/plugin-opener";
 import { FolderOpen } from "lucide-react";
 import { useEffect, useState } from "react";
-import { Button } from "../components/ui";
+import { Button, Dialog } from "../components/ui";
 import { api } from "../lib/api";
-import { bytes, date, files } from "../lib/format";
+import { basename, bytes, date, files } from "../lib/format";
 import { useStore } from "../lib/store";
-import type { HistoryItem } from "../lib/types";
+import type { HistoryItem, UndoReport } from "../lib/types";
 
 /** Что произошло — одной-двумя фразами, без терминов (ТЗ 8.5). */
 function describe(h: HistoryItem, running: boolean): string[] {
@@ -30,14 +30,55 @@ function describe(h: HistoryItem, running: boolean): string[] {
   return lines;
 }
 
+/** Можно ли что-то вернуть: удалённое навсегда — нельзя. */
+export const canUndo = (h: HistoryItem) =>
+  !h.undone && h.finishedMs !== null && (h.kind === "convert" ? h.done > 0 : h.trashed + h.moved > 0);
+
+/** Что произойдёт при «Вернуть как было» — до нажатия, простыми словами. */
+function undoWords(h: HistoryItem): string {
+  const parts =
+    h.kind === "convert"
+      ? [
+          `Готовые файлы (${h.done}) уйдут в корзину.`,
+          h.trashed ? "Исходные файлы вернутся из корзины на прежние места." : "",
+        ]
+      : ["Убранные файлы вернутся на прежние места."];
+  if (h.deleted) parts.push("Файлы, удалённые навсегда, вернуть нельзя.");
+  return parts.filter(Boolean).join(" ");
+}
+
+/** Итог отмены одной фразой; проблемы — в «Подробности». */
+export async function undoEntry(id: number): Promise<string> {
+  const r: UndoReport = await api.historyUndo(id);
+  const addLog = useStore.getState().addLog;
+  for (const [path, problem] of r.problems) addLog("Warn", `${basename(path)}: ${problem}`, path);
+  const done = r.restored || r.removed ? "Готово, всё вернулось как было." : "Ничего не вернулось.";
+  return r.problems.length
+    ? `${done} Не получилось: ${files(r.problems.length)} — подробности во вкладке «Подробности».`
+    : done;
+}
+
 /** Что программа делала с файлами: последние 100 действий, новые сверху. */
 export function HistoryView() {
   const [items, setItems] = useState<HistoryItem[] | null>(null);
+  const [confirm, setConfirm] = useState<HistoryItem | null>(null);
+  const [result, setResult] = useState<{ id: number; text: string } | null>(null);
   const running = useStore((s) => s.run.active);
+  const reload = () => api.historyList().then(setItems, () => setItems([]));
 
   useEffect(() => {
-    api.historyList().then(setItems, () => setItems([]));
+    void reload();
   }, [running]);
+
+  const undo = async (h: HistoryItem) => {
+    setConfirm(null);
+    try {
+      setResult({ id: h.id, text: await undoEntry(h.id) });
+    } catch (e) {
+      setResult({ id: h.id, text: `Не получилось: ${e}` });
+    }
+    void reload();
+  };
 
   if (items === null) return null;
   return (
@@ -59,18 +100,40 @@ export function HistoryView() {
                   {line}
                 </p>
               ))}
-              {h.outputDirs.length > 0 && (
-                <div className="flex flex-wrap gap-3">
+              {result?.id === h.id && <p className="rounded-lg bg-accent-soft px-4 py-3 text-[16px]">{result.text}</p>}
+              <div className="flex flex-wrap gap-3">
+                {h.outputDirs.length > 0 && !h.undone && (
                   <Button onClick={() => void openPath(h.outputDirs[0])}>
                     <FolderOpen className="size-5" />
                     Открыть папку с результатом
                   </Button>
-                </div>
-              )}
+                )}
+                {canUndo(h) && (
+                  <Button disabled={running} onClick={() => setConfirm(h)}>
+                    Вернуть как было
+                  </Button>
+                )}
+              </div>
             </article>
           ))
         )}
       </div>
+      <Dialog
+        open={confirm !== null}
+        onOpenChange={(v) => !v && setConfirm(null)}
+        title="Вернуть как было?"
+        width={480}
+        footer={
+          <>
+            <Button variant="primary" onClick={() => confirm && void undo(confirm)}>
+              Вернуть как было
+            </Button>
+            <Button onClick={() => setConfirm(null)}>Не надо</Button>
+          </>
+        }
+      >
+        <p className="text-[16px] leading-relaxed">{confirm && undoWords(confirm)}</p>
+      </Dialog>
     </div>
   );
 }

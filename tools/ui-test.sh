@@ -52,6 +52,15 @@ else
   echo "нет xvfb-run и kwin_wayland — окно теста откроется на экране"
   timeout 300 "${app[@]}" | tee "$work/result.log" || status=$?
 fi
+# Проверка по самим файлам: «Вернуть как было» вернуло копию и убрало результаты.
+if [[ $status -eq 0 ]]; then
+  for f in "phone/IMG_A.HEIC" "phone/IMG_B.png" "copies/Отпуск.heic" "copies/Отпуск (копия).heic"; do
+    [[ -f "$work/files/$f" ]] || { echo "ui-test: нет файла $f после «Вернуть как было»"; status=1; }
+  done
+  for f in "phone/IMG_A.jpg" "phone/IMG_B.jpg"; do
+    [[ ! -e "$work/files/$f" ]] || { echo "ui-test: результат $f не убран при отмене"; status=1; }
+  done
+fi
 [[ $status -eq 0 ]] && grep -q "итог: всё прошло" "$work/result.log" || {
   echo "АВТОТЕСТЫ ИНТЕРФЕЙСА НЕ ПРОШЛИ (подробности: $work)" >&2
   exit 1

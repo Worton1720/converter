@@ -11,6 +11,7 @@ import type {
   LoadLevel,
   PhotoKind,
   HistoryItem,
+  UndoReport,
   UpdateInfo,
   Settings,
   SpaceCheck,
@@ -39,6 +40,7 @@ export const api = {
   cancelItem: (path: string) => invoke<void>("cancel_item", { path }),
 
   historyList: () => invoke<HistoryItem[]>("history_list"),
+  historyUndo: (id: number) => invoke<UndoReport>("history_undo", { id }),
   checkUpdate: () => invoke<UpdateInfo | null>("check_update"),
   installUpdate: () => invoke<void>("install_update"),
   dupesFind: (options: DupesOptions) => invoke<DupesResult>("dupes_find", { options }),

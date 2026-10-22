@@ -258,3 +258,10 @@ export interface HistoryItem {
   outputDirs: string[];
   undone: boolean;
 }
+
+/** Итог «Вернуть как было» (`history::UndoReport`). */
+export interface UndoReport {
+  restored: number;
+  removed: number;
+  problems: [string, string][];
+}

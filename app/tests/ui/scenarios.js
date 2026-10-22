@@ -131,6 +131,10 @@
     checkElderlyRules("найдены копии");
     await click("Убрать лишние копии в корзину");
     await until(() => text().includes("Убрано в корзину: 1"), "итог «Убрано в корзину»");
+    checkElderlyRules("итог уборки");
+    // Передумал — кнопка рядом с итогом.
+    await click("Вернуть как было");
+    await until(() => text().includes("всё вернулось как было"), "итог «всё вернулось как было»");
   });
 
   await test("история: что было сделано с файлами", async () => {
@@ -138,8 +142,16 @@
     await until(() => text().includes("Что программа делала с файлами"), "экран истории");
     await until(() => text().includes("Преобразовано 2 файла"), "запись о преобразовании");
     expect(text().includes("Убрано одинаковых файлов: 1"), "нет записи об уборке копии");
+    expect(text().includes("Отменено: всё возвращено как было"), "уборка не помечена отменённой");
     expect(button("Открыть папку с результатом"), "нет кнопки «Открыть папку с результатом»");
     checkElderlyRules("история");
+    // Отменить преобразование: подтверждение с объяснением, затем результат уходит в корзину.
+    await click("Вернуть как было");
+    const dialog = await until(() => document.querySelector("[role=dialog]"), "окно подтверждения");
+    expect(dialog.innerText.includes("Готовые файлы (2) уйдут в корзину"), `нет объяснения: ${dialog.innerText}`);
+    checkElderlyRules("подтверждение отмены");
+    [...dialog.querySelectorAll("button")].find((b) => b.textContent.trim() === "Вернуть как было").click();
+    await until(() => text().includes("Готово, всё вернулось как было"), "итог отмены преобразования");
   });
 
   await test("настройки: понятные слова и крупные цели", async () => {
