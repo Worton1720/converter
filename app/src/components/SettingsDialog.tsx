@@ -3,6 +3,7 @@ import { useState } from "react";
 import { api } from "../lib/api";
 import { bytes } from "../lib/format";
 import { useStore } from "../lib/store";
+import { checkForUpdate, useUpdate } from "../lib/update";
 import type { FfmpegSource, Theme } from "../lib/types";
 import { Advanced } from "./Advanced";
 import { AboutDialog } from "./AboutDialog";
@@ -11,6 +12,41 @@ import { Button, Dialog, Field, Select, Switch } from "./ui";
 
 const sourceKey = (s: FfmpegSource) => (typeof s === "object" ? "Custom" : s);
 const CODEC: Record<string, string> = { H264: "H.264", Hevc: "HEVC", Hevc10: "HEVC 10 бит", Av1: "AV1" };
+
+/** Проверка обновлений: при запуске и по кнопке. Итог — словами, без всплывающих подсказок. */
+function UpdateSettings() {
+  const settings = useStore((s) => s.settings);
+  const updateSettings = useStore((s) => s.updateSettings);
+  const version = useStore((s) => s.info?.version);
+  const { checkResult, info } = useUpdate();
+  if (!settings) return null;
+  const result =
+    checkResult === "checking"
+      ? "Проверяю…"
+      : checkResult === "latest"
+        ? `У вас последняя версия (${version}).`
+        : checkResult === "failed"
+          ? "Проверить не получилось. Возможно, нет подключения к интернету."
+          : info
+            ? `Вышла новая версия ${info.version} — кнопка «Обновить» вверху окна.`
+            : null;
+  return (
+    <div className="space-y-3">
+      <Switch
+        checked={settings.check_updates ?? true}
+        onChange={(check_updates) => updateSettings((s) => ({ ...s, check_updates }))}
+        label="Проверять обновления при запуске"
+        hint="Программа сама скажет, когда выйдет новая версия"
+      />
+      <div className="flex flex-wrap items-center gap-3">
+        <Button disabled={checkResult === "checking"} onClick={() => void checkForUpdate(true)}>
+          Проверить обновления сейчас
+        </Button>
+        {result && <span className="text-[16px] text-muted">{result}</span>}
+      </div>
+    </div>
+  );
+}
 
 export function SettingsDialog({ open: isOpen, onClose }: { open: boolean; onClose: () => void }) {
   const settings = useStore((s) => s.settings);
@@ -86,6 +122,7 @@ export function SettingsDialog({ open: isOpen, onClose }: { open: boolean; onClo
             label="Не давать компьютеру уснуть"
             hint="Пока программа работает с файлами"
           />
+          <UpdateSettings />
         </section>
 
         <div className="-mx-5 border-t border-line">

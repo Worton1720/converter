@@ -11,7 +11,7 @@ use crate::error::{Error, IoContext, Result};
 use crate::options::PngCompression;
 
 /// Предел полезной нагрузки сегмента APP1 в JPEG.
-const JPEG_APP1_MAX: usize = 65_533;
+pub(super) const JPEG_APP1_MAX: usize = 65_533;
 const XMP_JPEG_HEADER: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
 
 fn encode_err(e: impl std::fmt::Display) -> Error {

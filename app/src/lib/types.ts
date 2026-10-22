@@ -81,6 +81,7 @@ export type Theme = "System" | "Light" | "Dark";
 export interface Settings {
   /** Версия схемы `settings.toml` (миграции — `Settings::migrate` в ядре). */
   version: number;
+  check_updates: boolean;
   convert: ConvertOptions;
   load: LoadLevel;
   ffmpeg: FfmpegSource;
@@ -175,6 +176,13 @@ export interface SpaceCheck {
   free: number;
 }
 
+/** Оценка места перед стартом (`engine::SpaceEstimate`). */
+export interface SpaceEstimate {
+  needed: number;
+  sources: number;
+  free: number;
+}
+
 export interface DupesOptions {
   roots: string[];
   recursive: boolean;
@@ -224,4 +232,12 @@ export type DupesProgress =
 export interface ActionResult {
   path: string;
   error: string | null;
+}
+
+/** Новая версия программы (`update::UpdateInfo`). */
+export interface UpdateInfo {
+  version: string;
+  notes: string | null;
+  /** Как установлена программа; `null` — переносная версия, обновляется вручную. */
+  installer: "appimage" | "deb" | "nsis" | null;
 }

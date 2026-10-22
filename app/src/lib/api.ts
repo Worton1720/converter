@@ -10,8 +10,10 @@ import type {
   KeepRule,
   LoadLevel,
   PhotoKind,
+  UpdateInfo,
   Settings,
   SpaceCheck,
+  SpaceEstimate,
 } from "./types";
 
 export const api = {
@@ -25,6 +27,8 @@ export const api = {
   removeItems: (paths: string[]) => invoke<void>("remove_items", { paths }),
   clearItems: () => invoke<void>("clear_items"),
 
+  spaceEstimate: (options: ConvertOptions, paths: string[]) =>
+    invoke<SpaceEstimate>("space_estimate", { options, paths }),
   spaceCheck: (options: ConvertOptions, paths: string[]) =>
     invoke<SpaceCheck[]>("space_check", { options, paths }),
   startConvert: (options: ConvertOptions, paths: string[]) =>
@@ -33,6 +37,8 @@ export const api = {
   cancelConvert: () => invoke<void>("cancel_convert"),
   cancelItem: (path: string) => invoke<void>("cancel_item", { path }),
 
+  checkUpdate: () => invoke<UpdateInfo | null>("check_update"),
+  installUpdate: () => invoke<void>("install_update"),
   dupesFind: (options: DupesOptions) => invoke<DupesResult>("dupes_find", { options }),
   dupesCancel: () => invoke<void>("dupes_cancel"),
   dupesAuto: (rule: KeepRule, keepFormat: PhotoKind) =>

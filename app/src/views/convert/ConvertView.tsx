@@ -1,12 +1,12 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { FilePlus2, FolderOpen, FolderPlus, LayoutGrid, List, Pause, Play, Square } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Button, Dialog, ProgressBar, Step } from "../../components/ui";
 import { api } from "../../lib/api";
 import { basename, bytes, dirname, etaWords, files, mediaCount, plainError } from "../../lib/format";
 import { useStore } from "../../lib/store";
-import type { SpaceCheck } from "../../lib/types";
+import type { ConvertOptions, SpaceCheck, SpaceEstimate } from "../../lib/types";
 import { FileGrid } from "./FileGrid";
 import { FileTable } from "./FileTable";
 import { OptionsPanel } from "./OptionsPanel";
@@ -124,6 +124,21 @@ export function ConvertView() {
 }
 
 /** Шаг 3: запуск, прогресс человеческим языком и понятный итог. */
+/** Одна фраза о месте на диске перед стартом (план после 0.2.0, п. 2). Файлы в корзине
+ *  место не освобождают, пока её не очистить, — это пожилому пользователю не очевидно. */
+function spaceWords(e: SpaceEstimate, sources: ConvertOptions["sources"]): string | null {
+  if (e.needed < 1024 * 1024) return null;
+  const grows = e.needed > e.sources;
+  const base = `Результат займёт около ${bytes(e.needed)}${
+    grows ? ` — больше, чем сейчас занимают исходные файлы (${bytes(e.sources)})` : ""
+  }.`;
+  const free = ` На диске свободно ${bytes(e.free)}.`;
+  if (sources === "Keep") return base + free;
+  if (sources === "Trash")
+    return `${base}${free} Исходные файлы уйдут в корзину и продолжат занимать место, пока её не очистить.`;
+  return `${base} Исходные файлы (${bytes(e.sources)}) будут удалены.${free}`;
+}
+
 function RunPanel() {
   const order = useStore((s) => s.order);
   const rows = useStore((s) => s.rows);
@@ -137,6 +152,8 @@ function RunPanel() {
   const ffmpegMissing = useStore((s) => s.info !== null && !s.info.ffmpeg);
   const [space, setSpace] = useState<{ paths: string[]; checks: SpaceCheck[] } | null>(null);
   const [details, setDetails] = useState(false);
+  const options = useStore((s) => s.settings?.convert);
+  const [estimate, setEstimate] = useState<SpaceEstimate | null>(null);
 
   // Запускаем всё, что ещё не готово.
   const targets = useMemo(
@@ -152,6 +169,18 @@ function RunPanel() {
     }
     return { images, videos };
   }, [targets, rows]);
+  // Оценка места — с задержкой: список и настройки меняются пачками.
+  useEffect(() => {
+    if (!options || !targets.length || run.active) {
+      setEstimate(null);
+      return;
+    }
+    const t = setTimeout(() => {
+      api.spaceEstimate(options, targets).then(setEstimate, () => setEstimate(null));
+    }, 400);
+    return () => clearTimeout(t);
+  }, [options, targets, run.active]);
+
   const failed = useMemo(() => run.paths.filter((p) => rows[p]?.job.status === "failed"), [run.paths, rows]);
   const outputDirs = useMemo(() => {
     const dirs = new Set<string>();
@@ -284,11 +313,16 @@ function RunPanel() {
             «Расширенные настройки» и укажите папку с ffmpeg.
           </p>
         ) : (
-          <p className="text-[16px] text-muted">
-            {targets.length
-              ? `Будет обработано ${mediaCount(targetCounts.images, targetCounts.videos)}.`
-              : "Сначала выберите фото и видео — шаг 1."}
-          </p>
+          <div className="space-y-1">
+            <p className="text-[16px] text-muted">
+              {targets.length
+                ? `Будет обработано ${mediaCount(targetCounts.images, targetCounts.videos)}.`
+                : "Сначала выберите фото и видео — шаг 1."}
+            </p>
+            {targets.length > 0 && estimate && options && (
+              <p className="text-[16px] text-muted">{spaceWords(estimate, options.sources)}</p>
+            )}
+          </div>
         )}
         <Button
           variant="primary"

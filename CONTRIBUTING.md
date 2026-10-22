@@ -53,7 +53,11 @@ Windows-код (`cfg(windows)`) проверяется только в CI на `
 3. `git push`, затем `gh pr create --base master --head dev --fill` (или кнопка «Compare & pull request» на GitHub).
 4. Когда проверки в запросе зелёные — слейте его. Тег `vX.Y.Z` и выпуск с установщиками и контрольными суммами появятся сами.
 
-Версия с суффиксом (`1.0.0-beta.1`) публикуется как предварительная. Собрать пакеты без выпуска — ручной запуск workflow «Release» во вкладке Actions или локально `tools/build-linux.sh`.
+Версия с суффиксом (`1.0.0-beta.1`) публикуется как предварительная.
+
+### Ключ подписи обновлений
+
+Программа ставит обновление, только если `latest.json` и файлы подписаны ключом проекта (открытый ключ — в `tauri.conf.json`, `plugins.updater.pubkey`). Закрытый ключ и пароль к нему лежат в секретах репозитория `TAURI_SIGNING_PRIVATE_KEY` и `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`; конвейер выпуска подписывает ими установщики и собирает `latest.json`. Копия у владельца — `~/.tauri/converter-updater.key` и `.password`. **Если ключ потерять, уже установленные программы не примут ни одного следующего обновления** — только переустановка вручную. Локальная сборка с подписью: `TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/converter-updater.key)" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$(cat ~/.tauri/converter-updater.password)" tools/build-linux.sh`; без ключа пакеты собираются без файлов автообновления. Собрать пакеты без выпуска — ручной запуск workflow «Release» во вкладке Actions или локально `tools/build-linux.sh`.
 
 ## Значки
 

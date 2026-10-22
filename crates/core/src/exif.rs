@@ -9,9 +9,11 @@ const TAG_ORIENTATION: u16 = 0x0112;
 const TAG_EXIF_IFD: u16 = 0x8769;
 const TAG_GPS_IFD: u16 = 0x8825;
 const TAG_DATE_TIME_ORIGINAL: u16 = 0x9003;
+const TAG_COMPRESSION: u16 = 0x0103;
 const TAG_THUMBNAIL_OFFSET: u16 = 0x0201;
 const TAG_THUMBNAIL_LENGTH: u16 = 0x0202;
 const TYPE_SHORT: u16 = 3;
+const TYPE_LONG: u16 = 4;
 
 /// Приводит EXIF из разных контейнеров к «голому» TIFF (`II*\0…` / `MM\0*…`).
 ///
@@ -153,6 +155,59 @@ pub fn thumbnail(tiff: &[u8]) -> Option<&[u8]> {
     let len = t.find(ifd1, TAG_THUMBNAIL_LENGTH)?.value as usize;
     let data = tiff.get(start..start.checked_add(len)?)?;
     data.starts_with(&[0xFF, 0xD8]).then_some(data)
+}
+
+/// Новый EXIF с миниатюрой: блок копируется, в конец дописываются IFD1 {Compression = JPEG,
+/// смещение, длина} и сама миниатюра, указатель «следующий IFD» у IFD0 переводится на неё.
+/// Прежние записи не двигаются — остальные теги (и MakerNote) остаются корректными;
+/// старая миниатюра, если была, просто перестаёт быть нужной.
+pub fn with_thumbnail(tiff: &[u8], jpeg: &[u8]) -> Option<Vec<u8>> {
+    let t = Tiff::new(tiff)?;
+    let ifd0 = t.ifd0()?;
+    let next_at = ifd0 + 2 + t.entries(ifd0)?.len() * 12;
+    t.u32(next_at)?;
+    let w16 = |v: u16| {
+        if t.le {
+            v.to_le_bytes()
+        } else {
+            v.to_be_bytes()
+        }
+    };
+    let w32 = |v: u32| {
+        if t.le {
+            v.to_le_bytes()
+        } else {
+            v.to_be_bytes()
+        }
+    };
+    let mut out = tiff.to_vec();
+    if out.len() % 2 == 1 {
+        out.push(0); // IFD — по чётному смещению
+    }
+    let ifd1 = out.len();
+    let jpeg_at = ifd1 + 2 + 3 * 12 + 4;
+    out.extend_from_slice(&w16(3));
+    for (tag, typ, value) in [
+        (TAG_COMPRESSION, TYPE_SHORT, None),
+        (TAG_THUMBNAIL_OFFSET, TYPE_LONG, Some(jpeg_at as u32)),
+        (TAG_THUMBNAIL_LENGTH, TYPE_LONG, Some(jpeg.len() as u32)),
+    ] {
+        out.extend_from_slice(&w16(tag));
+        out.extend_from_slice(&w16(typ));
+        out.extend_from_slice(&w32(1));
+        match value {
+            Some(v) => out.extend_from_slice(&w32(v)),
+            None => {
+                // SHORT лежит в первых двух байтах поля значения: 6 = JPEG.
+                out.extend_from_slice(&w16(6));
+                out.extend_from_slice(&[0, 0]);
+            }
+        }
+    }
+    out.extend_from_slice(&w32(0));
+    out.extend_from_slice(jpeg);
+    out[next_at..next_at + 4].copy_from_slice(&w32(ifd1 as u32));
+    Some(out)
 }
 
 /// Ставит Orientation = 1. Возвращает `false`, если блок не удалось разобрать.
@@ -320,6 +375,27 @@ mod tests {
             for cut in [50, 60, d.len() - 2] {
                 assert_eq!(thumbnail(&d[..cut]), None);
             }
+        }
+    }
+
+    #[test]
+    fn adds_thumbnail_keeping_other_tags() {
+        for le in [true, false] {
+            let d = sample(le);
+            let jpeg = [0xFF, 0xD8, 1, 2, 3, 0xFF, 0xD9];
+            let out = with_thumbnail(&d, &jpeg).unwrap();
+            // Прежние байты на месте, кроме указателя «следующий IFD» у IFD0 (8 + 2 + 3×12).
+            assert_eq!(&out[..46], &d[..46]);
+            assert_eq!(&out[50..d.len()], &d[50..]);
+            assert_eq!(thumbnail(&out), Some(&jpeg[..]));
+            assert_eq!(orientation(&out), Some(6));
+            assert_eq!(
+                date_time_original(&out).as_deref(),
+                Some("2024:05:17 10:20:30")
+            );
+            // Повторная запись заменяет миниатюру.
+            let again = with_thumbnail(&out, &[0xFF, 0xD8, 9, 0xFF, 0xD9]).unwrap();
+            assert_eq!(thumbnail(&again), Some(&[0xFF, 0xD8, 9, 0xFF, 0xD9][..]));
         }
     }
 

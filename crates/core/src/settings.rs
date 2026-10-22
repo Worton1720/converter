@@ -90,6 +90,8 @@ pub struct Settings {
     pub scan_recursive: bool,
     /// Добавлять скрытые файлы (FR-1.2).
     pub scan_hidden: bool,
+    /// Проверять при запуске, не вышла ли новая версия.
+    pub check_updates: bool,
 }
 
 impl Default for Settings {
@@ -107,6 +109,7 @@ impl Default for Settings {
             presets: Vec::new(),
             scan_recursive: true,
             scan_hidden: false,
+            check_updates: true,
         }
     }
 }

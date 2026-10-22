@@ -1,6 +1,7 @@
 //! Tauri-оболочка над `converter-core`: команды для интерфейса и события прогресса.
 
 mod dto;
+mod update;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -328,6 +329,15 @@ fn space_check(
     state: State<'_, AppState>,
 ) -> Vec<SpaceCheck> {
     engine::space_check(&selected_items(&state, &paths), &options)
+}
+
+#[tauri::command]
+fn space_estimate(
+    options: ConvertOptions,
+    paths: Vec<String>,
+    state: State<'_, AppState>,
+) -> engine::SpaceEstimate {
+    engine::space_estimate(&selected_items(&state, &paths), &options)
 }
 
 // ---------- конвертация ----------
@@ -721,7 +731,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(state)
+        .manage(update::UpdateState::default())
         .setup(|app| {
             // Встроенный ffmpeg лежит в ресурсах приложения (AppImage, установщик Windows).
             let state = app.state::<AppState>();
@@ -775,6 +787,7 @@ pub fn run() {
             remove_items,
             clear_items,
             space_check,
+            space_estimate,
             start_convert,
             pause_convert,
             cancel_convert,
@@ -788,6 +801,8 @@ pub fn run() {
             clear_thumb_cache,
             write_text_file,
             quit,
+            update::check_update,
+            update::install_update,
         ])
         .run(tauri::generate_context!())
         .expect("ошибка запуска приложения");
