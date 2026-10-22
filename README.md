@@ -85,7 +85,9 @@ converter dupes ~/Фото --action trash          # лишние копии —
 | Параметр `convert` | Значения | По умолчанию |
 |---|---|---|
 | `--to` | `jpeg`, `png`, `webp` | `jpeg` |
-| `--video` | `compat` (H.264), `compact` (HEVC), `webm`, `webm-vp9`, `mkv` | `compat` |
+| `--video` | `compat` (H.264), `compact` (HEVC), `webm`, `webm-vp9`, `mkv`, `mp3`, `m4a` (только звук), `manual` | `compat` |
+| `--codec`, `--container`, `--crf`, `--short-side`, `--fps` | параметры для `--video manual` | H.264, MP4, по профилю |
+| `--audio-kbps` | битрейт звука при перекодировании | `192` |
 | `--load` | `auto`, `low`, `medium`, `high`, `max` или число потоков | `auto` |
 | `--hw` | `auto`, `off`, `nvenc`, `qsv`, `amf`, `vaapi` | `auto` |
 | `--sources` | `keep`, `trash`, `delete` | `keep` |

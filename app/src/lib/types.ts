@@ -1,7 +1,24 @@
 // Типы повторяют serde-представление структур ядра (crates/core) и dto.rs.
 
 export type ImageFormat = "Png" | "Jpeg" | "Webp";
-export type VideoMode = "Compat" | "Compact" | { Webm: "Av1" | "Vp9" } | "Mkv";
+export type AudioFormat = "Mp3" | "M4a";
+/** Ручной режим видео (`options::ManualVideo`). */
+export interface ManualVideo {
+  codec: "H264" | "Hevc" | "Av1" | "Vp9";
+  container: "Mp4" | "Mkv" | "Webm";
+  /** CRF/QP: меньше — лучше. `null` — по профилю качества. */
+  crf: number | null;
+  /** Меньшая сторона кадра, только уменьшение. */
+  short_side: number | null;
+  fps: number | null;
+}
+export type VideoMode =
+  | "Compat"
+  | "Compact"
+  | { Webm: "Av1" | "Vp9" }
+  | "Mkv"
+  | { Audio: AudioFormat }
+  | { Manual: ManualVideo };
 export type QualityProfile = "Fast" | "Balanced" | "High";
 export type HwBackend = "Nvenc" | "Qsv" | "Amf" | "Vaapi";
 export type HwPreference = "Auto" | "Off" | { Only: HwBackend };

@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 use crate::hw::HwCaps;
 use crate::options::{
-    HwBackend, HwPreference, MetadataPolicy, QualityProfile, VideoMode, VideoOptions, WebmCodec,
+    AudioFormat, HwBackend, HwPreference, ManualCodec, ManualContainer, MetadataPolicy,
+    QualityProfile, VideoMode, VideoOptions, WebmCodec,
 };
 use crate::probe::{StreamInfo, StreamKind, VideoInfo};
 
@@ -87,13 +88,19 @@ pub fn hw_encoder_name(backend: HwBackend, codec: Codec) -> &'static str {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum VideoAction {
     Copy,
-    Encode { encoder: Encoder, tonemap: bool },
+    Encode {
+        encoder: Encoder,
+        tonemap: bool,
+    },
+    /// Видео не нужно — только звук.
+    Drop,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum AudioCodec {
     Aac,
     Opus,
+    Mp3,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -107,6 +114,9 @@ pub enum Container {
     Mp4,
     Webm,
     Mkv,
+    /// Только звук.
+    Mp3,
+    M4a,
 }
 
 /// Стоимость задачи для планировщика (раздел 6.3).
@@ -130,6 +140,10 @@ pub struct VideoPlan {
     /// HDR сохраняется (HEVC Main10 в режиме «Компактно»).
     pub keep_hdr: bool,
     pub warnings: Vec<String>,
+    /// Ручной режим: CRF/QP вместо профиля, меньшая сторона кадра, частота кадров.
+    pub crf: Option<u8>,
+    pub short_side: Option<u32>,
+    pub fps: Option<u32>,
 }
 
 impl VideoPlan {
@@ -137,14 +151,19 @@ impl VideoPlan {
         self.video == VideoAction::Copy
     }
 
+    /// Фильтры кадров на CPU помимо формата пикселей.
+    fn cpu_filters(&self) -> bool {
+        self.short_side.is_some() || self.fps.is_some()
+    }
+
     pub fn cost(&self) -> Cost {
         match &self.video {
-            VideoAction::Copy => Cost::Light,
+            VideoAction::Copy | VideoAction::Drop => Cost::Light,
             VideoAction::Encode {
                 encoder: Encoder::Hw(_),
                 tonemap,
             } => Cost::Hw {
-                cpu_filters: *tonemap,
+                cpu_filters: *tonemap || self.cpu_filters(),
             },
             VideoAction::Encode { .. } => Cost::Cpu,
         }
@@ -166,6 +185,11 @@ impl VideoPlan {
             .iter()
             .any(|a| matches!(a, AudioAction::Encode(..)));
         match &self.video {
+            VideoAction::Drop => match self.container {
+                Container::Mp3 if audio_encoded => "только звук, MP3".into(),
+                Container::M4a if audio_encoded => "только звук, AAC".into(),
+                _ => "только звук, без перекодирования".into(),
+            },
             VideoAction::Copy if audio_encoded => "перепаковка, аудио перекодировано".into(),
             VideoAction::Copy => "перепаковка без перекодирования".into(),
             VideoAction::Encode { encoder, tonemap } => {
@@ -195,6 +219,7 @@ impl VideoPlan {
                 tonemap: false,
             }
         ) && src.rotation == 0
+            && !self.cpu_filters()
             && matches!(
                 src.pix_fmt.as_deref(),
                 Some("yuv420p" | "yuvj420p" | "nv12")
@@ -222,6 +247,9 @@ pub fn plan(
     caps: &HwCaps,
     force_sw: bool,
 ) -> Result<VideoPlan> {
+    if let VideoMode::Audio(format) = opts.mode {
+        return plan_audio(info, format);
+    }
     let src = info
         .main_video()
         .ok_or_else(|| Error::Invalid("в файле нет видеопотока".into()))?;
@@ -300,6 +328,31 @@ pub fn plan(
             (Container::Webm, action)
         }
         VideoMode::Mkv => (Container::Mkv, VideoAction::Copy),
+        VideoMode::Manual(m) => {
+            let container = match m.container {
+                ManualContainer::Mp4 => Container::Mp4,
+                ManualContainer::Mkv => Container::Mkv,
+                ManualContainer::Webm => Container::Webm,
+            };
+            if container == Container::Webm
+                && !matches!(m.codec, ManualCodec::Av1 | ManualCodec::Vp9)
+            {
+                return Err(Error::Invalid("WebM поддерживает только AV1 и VP9".into()));
+            }
+            let encoder = match m.codec {
+                ManualCodec::H264 => hw_or(Codec::H264, SwEncoder::X264),
+                ManualCodec::Hevc => hw_or(Codec::Hevc, SwEncoder::X265),
+                ManualCodec::Av1 => hw_or(Codec::Av1, SwEncoder::SvtAv1),
+                ManualCodec::Vp9 => Encoder::Sw(SwEncoder::Vp9),
+            };
+            // Видео всегда перекодируется: пользователь сам задал параметры. Выход 8-битный.
+            let action = VideoAction::Encode {
+                encoder,
+                tonemap: src.is_hdr(),
+            };
+            (container, action)
+        }
+        VideoMode::Audio(_) => unreachable!("обработано выше"),
     };
 
     let audio = match container {
@@ -336,6 +389,7 @@ pub fn plan(
             })
             .into_iter()
             .collect(),
+        Container::Mp3 | Container::M4a => unreachable!("только в plan_audio"),
     };
 
     let subtitles = match container {
@@ -351,6 +405,10 @@ pub fn plan(
         warnings.push("субтитры не переносятся в этот контейнер".into());
     }
 
+    let (crf, short_side, fps) = match opts.mode {
+        VideoMode::Manual(m) => (m.crf, m.short_side, m.fps),
+        _ => (None, None, None),
+    };
     Ok(VideoPlan {
         container,
         video_index: src.index,
@@ -359,12 +417,46 @@ pub fn plan(
         subtitles,
         keep_hdr,
         warnings,
+        crf,
+        short_side,
+        fps,
+    })
+}
+
+/// Только звук (раздел 4.2): первая декодируемая дорожка. Если она уже в нужном формате,
+/// копируется без потерь; иначе перекодируется с битрейтом из настроек.
+fn plan_audio(info: &VideoInfo, format: AudioFormat) -> Result<VideoPlan> {
+    let a = info
+        .first_decodable_audio()
+        .ok_or_else(|| Error::Invalid("в видео нет звука".into()))?;
+    let (container, copyable, codec): (_, &[&str], _) = match format {
+        AudioFormat::Mp3 => (Container::Mp3, &["mp3"], AudioCodec::Mp3),
+        AudioFormat::M4a => (Container::M4a, &["aac", "alac"], AudioCodec::Aac),
+    };
+    let action = if codec_is(a, copyable) {
+        AudioAction::Copy(a.index)
+    } else {
+        AudioAction::Encode(a.index, codec)
+    };
+    Ok(VideoPlan {
+        container,
+        video_index: a.index,
+        video: VideoAction::Drop,
+        audio: vec![action],
+        subtitles: Vec::new(),
+        keep_hdr: false,
+        warnings: Vec::new(),
+        crf: None,
+        short_side: None,
+        fps: None,
     })
 }
 
 /// Результат совпал бы с исходником (раздел 4.2): тот же контейнер, только копирование.
 pub fn is_noop(plan: &VideoPlan, info: &VideoInfo, metadata: MetadataPolicy) -> bool {
     let same_container = match plan.container {
+        // Звук извлекается из видео — исходник заведомо другой.
+        Container::Mp3 | Container::M4a => false,
         // У MOV и MP4 одинаковый format_name — различает только major_brand.
         Container::Mp4 => {
             info.is_container("mp4")
@@ -384,6 +476,17 @@ pub fn is_noop(plan: &VideoPlan, info: &VideoInfo, metadata: MetadataPolicy) -> 
 
 /// Параметры качества для кодировщика (FR-3.2). Таблица — в одном месте, покрыта тестом.
 pub fn quality_args(encoder: &Encoder, q: QualityProfile, threads: usize) -> Vec<String> {
+    quality_args_crf(encoder, q, threads, None)
+}
+
+/// То же, но число качества (CRF/QP) задано вручную (ручной режим, FR-3.1); пресет —
+/// по профилю. У AV1 на VAAPI и AMF шкала q-index 0–255 — CRF 0–63 умножается на 4.
+pub fn quality_args_crf(
+    encoder: &Encoder,
+    q: QualityProfile,
+    threads: usize,
+    crf: Option<u8>,
+) -> Vec<String> {
     let pick = |v: [&str; 3]| -> String {
         match q {
             QualityProfile::Fast => v[0],
@@ -392,6 +495,7 @@ pub fn quality_args(encoder: &Encoder, q: QualityProfile, threads: usize) -> Vec
         }
         .to_string()
     };
+    let num = |v: [&str; 3]| crf.map_or_else(|| pick(v), |c| c.to_string());
     let s = |x: &str| x.to_string();
     let t = threads.max(1).to_string();
     match encoder {
@@ -399,7 +503,7 @@ pub fn quality_args(encoder: &Encoder, q: QualityProfile, threads: usize) -> Vec
             s("-preset"),
             pick(["veryfast", "medium", "slow"]),
             s("-crf"),
-            pick(["26", "23", "19"]),
+            num(["26", "23", "19"]),
             s("-threads"),
             t,
         ],
@@ -407,7 +511,7 @@ pub fn quality_args(encoder: &Encoder, q: QualityProfile, threads: usize) -> Vec
             s("-preset"),
             pick(["veryfast", "fast", "medium"]),
             s("-crf"),
-            pick(["28", "26", "22"]),
+            num(["28", "26", "22"]),
             s("-x265-params"),
             format!("pools={t}:log-level=error"),
         ],
@@ -415,7 +519,7 @@ pub fn quality_args(encoder: &Encoder, q: QualityProfile, threads: usize) -> Vec
             s("-preset"),
             pick(["9", "7", "5"]),
             s("-crf"),
-            pick(["38", "32", "26"]),
+            num(["38", "32", "26"]),
             s("-svtav1-params"),
             format!("lp={t}"),
         ],
@@ -423,7 +527,7 @@ pub fn quality_args(encoder: &Encoder, q: QualityProfile, threads: usize) -> Vec
             s("-b:v"),
             s("0"),
             s("-crf"),
-            pick(["36", "32", "28"]),
+            num(["36", "32", "28"]),
             s("-deadline"),
             s("good"),
             s("-cpu-used"),
@@ -442,11 +546,17 @@ pub fn quality_args(encoder: &Encoder, q: QualityProfile, threads: usize) -> Vec
                 }
                 HwBackend::Qsv => (["27", "24", "20"], ["29", "26", "22"], ["32", "28", "24"]),
             };
-            let qp = pick(match e.codec {
-                Codec::H264 => h264,
-                Codec::Hevc | Codec::Hevc10 => hevc,
-                Codec::Av1 => av1,
-            });
+            let qindex =
+                e.codec == Codec::Av1 && matches!(e.backend, HwBackend::Vaapi | HwBackend::Amf);
+            let qp = match crf {
+                Some(c) if qindex => (u32::from(c) * 4).min(255).to_string(),
+                Some(c) => c.to_string(),
+                None => pick(match e.codec {
+                    Codec::H264 => h264,
+                    Codec::Hevc | Codec::Hevc10 => hevc,
+                    Codec::Av1 => av1,
+                }),
+            };
             let mut v = match e.backend {
                 HwBackend::Vaapi => vec![s("-rc_mode"), s("CQP"), s("-qp"), qp],
                 HwBackend::Qsv => vec![
@@ -585,7 +695,9 @@ pub fn build_args(input: &ArgsInput<'_>, source: &Path, output: &Path) -> Vec<Os
     let mut push = |items: Vec<String>| a.extend(items.into_iter().map(OsString::from));
     let s = |x: &str| x.to_string();
 
-    push(vec![s("-map"), format!("0:{}", plan.video_index)]);
+    if plan.video != VideoAction::Drop {
+        push(vec![s("-map"), format!("0:{}", plan.video_index)]);
+    }
     for au in &plan.audio {
         let idx = match au {
             AudioAction::Copy(i) | AudioAction::Encode(i, _) => *i,
@@ -598,6 +710,7 @@ pub fn build_args(input: &ArgsInput<'_>, source: &Path, output: &Path) -> Vec<Os
 
     let src = info.streams.get(plan.video_index);
     match &plan.video {
+        VideoAction::Drop => push(vec![s("-vn")]),
         VideoAction::Copy => push(vec![s("-c:v"), s("copy")]),
         VideoAction::Encode { encoder, tonemap } => {
             // Цветовые свойства задаются кадрам через setparams: выходные флаги
@@ -619,6 +732,16 @@ pub fn build_args(input: &ArgsInput<'_>, source: &Path, output: &Path) -> Vec<Os
             if *tonemap {
                 chain.push(TONEMAP.to_string());
             }
+            if let Some(side) = plan.short_side {
+                // Меньшая сторона — не больше `side`, вторая по пропорциям (чётная), без увеличения.
+                // Кадр уже повёрнут по displaymatrix, поэтому вертикальное видео тоже верно.
+                chain.push(format!(
+                    "scale='if(gte(iw,ih),-2,min(iw,{side}))':'if(gte(iw,ih),min(ih,{side}),-2)'"
+                ));
+            }
+            if let Some(fps) = plan.fps {
+                chain.push(format!("fps={fps}"));
+            }
             if let Some([p, t, c]) = &color {
                 chain.push(format!(
                     "setparams=color_primaries={p}:color_trc={t}:colorspace={c}"
@@ -633,7 +756,7 @@ pub fn build_args(input: &ArgsInput<'_>, source: &Path, output: &Path) -> Vec<Os
                 s("-c:v"),
                 s(encoder.name()),
             ]);
-            push(quality_args(encoder, opts.quality, threads));
+            push(quality_args_crf(encoder, opts.quality, threads, plan.crf));
             // Флаги — для атома colr в контейнере.
             if let Some([p, t, c]) = color {
                 push(vec![
@@ -645,7 +768,9 @@ pub fn build_args(input: &ArgsInput<'_>, source: &Path, output: &Path) -> Vec<Os
                     c,
                 ]);
             }
-            push(vec![s("-fps_mode"), s("passthrough")]);
+            if plan.fps.is_none() {
+                push(vec![s("-fps_mode"), s("passthrough")]);
+            }
         }
     }
 
@@ -656,6 +781,7 @@ pub fn build_args(input: &ArgsInput<'_>, source: &Path, output: &Path) -> Vec<Os
                 let (name, kbps) = match codec {
                     AudioCodec::Aac => ("aac", opts.audio_bitrate_kbps),
                     AudioCodec::Opus => ("libopus", 128),
+                    AudioCodec::Mp3 => ("libmp3lame", opts.audio_bitrate_kbps),
                 };
                 push(vec![
                     format!("-c:a:{audio_out}"),
@@ -671,6 +797,7 @@ pub fn build_args(input: &ArgsInput<'_>, source: &Path, output: &Path) -> Vec<Os
     }
 
     let hevc_out = match &plan.video {
+        VideoAction::Drop => false,
         VideoAction::Copy => src.is_some_and(|s| codec_is(s, &["hevc"])),
         VideoAction::Encode { encoder, .. } => {
             encoder.name().contains("265") || encoder.name().starts_with("hevc")
@@ -704,6 +831,14 @@ pub fn build_args(input: &ArgsInput<'_>, source: &Path, output: &Path) -> Vec<Os
         ]),
         Container::Webm => push(vec![s("-f"), s("webm")]),
         Container::Mkv => push(vec![s("-f"), s("matroska")]),
+        // ID3v2.3 читают все плееры; v2.4 — не все.
+        Container::Mp3 => push(vec![s("-id3v2_version"), s("3"), s("-f"), s("mp3")]),
+        Container::M4a => push(vec![
+            s("-movflags"),
+            s("+faststart+use_metadata_tags"),
+            s("-f"),
+            s("ipod"),
+        ]),
     }
     a.push(output.as_os_str().to_owned());
     a
@@ -712,6 +847,7 @@ pub fn build_args(input: &ArgsInput<'_>, source: &Path, output: &Path) -> Vec<Os
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::options::ManualVideo;
     use crate::probe::parse;
 
     fn info(codec: &str, pix: &str, trc: Option<&str>, audio: &str, format: &str) -> VideoInfo {
@@ -867,6 +1003,100 @@ mod tests {
         assert_eq!(p.container, Container::Webm);
         let p = plan(&i, &opts(VideoMode::Mkv), &HwCaps::default(), false).unwrap();
         assert!(p.is_remux());
+    }
+
+    #[test]
+    fn audio_only_copies_matching_track_and_encodes_otherwise() {
+        let i = info("hevc", "yuv420p", None, "aac", "mov,mp4");
+        let m4a = plan(
+            &i,
+            &opts(VideoMode::Audio(AudioFormat::M4a)),
+            &vaapi(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(m4a.video, VideoAction::Drop);
+        assert_eq!(m4a.audio, [AudioAction::Copy(1)]);
+        assert_eq!(m4a.cost(), Cost::Light);
+        assert!(!is_noop(&m4a, &i, MetadataPolicy::Keep));
+        let a = args_str(&m4a, &i, &opts(VideoMode::Audio(AudioFormat::M4a)), false);
+        assert!(a.contains("-map 0:1 -vn -c:a:0 copy"), "{a}");
+        assert!(!a.contains("-map 0:0"), "{a}");
+        assert!(a.ends_with("-f ipod out.mp4"), "{a}");
+
+        let mut o = opts(VideoMode::Audio(AudioFormat::Mp3));
+        o.audio_bitrate_kbps = 256;
+        let mp3 = plan(&i, &o, &vaapi(), false).unwrap();
+        assert_eq!(mp3.audio, [AudioAction::Encode(1, AudioCodec::Mp3)]);
+        let a = args_str(&mp3, &i, &o, false);
+        assert!(a.contains("-c:a:0 libmp3lame -b:a:0 256k"), "{a}");
+        assert!(a.contains("-id3v2_version 3 -f mp3"), "{a}");
+
+        // Видео без звука — понятная ошибка, а не пустой файл.
+        let silent = parse(
+            r#"{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","pix_fmt":"yuv420p"}],
+                "format":{"format_name":"mov,mp4","duration":"3"}}"#,
+        )
+        .unwrap();
+        let e = plan(&silent, &o, &vaapi(), false).unwrap_err();
+        assert!(e.to_string().contains("нет звука"), "{e}");
+    }
+
+    #[test]
+    fn manual_mode_always_encodes_with_user_settings() {
+        let i = info("h264", "yuv420p", None, "aac", "mov,mp4");
+        let m = ManualVideo {
+            codec: ManualCodec::Hevc,
+            container: ManualContainer::Mkv,
+            crf: Some(30),
+            short_side: Some(720),
+            fps: Some(25),
+        };
+        let o = opts(VideoMode::Manual(m));
+        assert_eq!(o.mode.extension(), "mkv");
+        // Источник уже H.264 — в ручном режиме всё равно кодируется.
+        let p = plan(&i, &o, &HwCaps::default(), false).unwrap();
+        assert!(!p.is_remux());
+        let a = args_str(&p, &i, &o, false);
+        assert!(a.contains("libx265"), "{a}");
+        assert!(a.contains("-crf 30"), "{a}");
+        assert!(a.contains("min(ih,720)") && a.contains("fps=25"), "{a}");
+        assert!(
+            !a.contains("passthrough"),
+            "частота задана — кадры не пропускаются как есть: {a}"
+        );
+
+        // На GPU: число качества идёт в QP, фильтры на CPU отменяют «только GPU».
+        let hw = plan(&i, &o, &vaapi(), false).unwrap();
+        assert_eq!(hw.cost(), Cost::Hw { cpu_filters: true });
+        assert!(!hw.gpu_only_eligible(&i));
+        assert!(args_str(&hw, &i, &o, false).contains("-qp 30"));
+
+        let webm = ManualVideo {
+            container: ManualContainer::Webm,
+            ..m
+        };
+        let e = plan(
+            &i,
+            &opts(VideoMode::Manual(webm)),
+            &HwCaps::default(),
+            false,
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("WebM"), "{e}");
+    }
+
+    #[test]
+    fn manual_crf_scales_to_av1_qindex_on_vaapi() {
+        let e = Encoder::Hw(HwEncoder {
+            backend: HwBackend::Vaapi,
+            codec: Codec::Av1,
+            device: None,
+        });
+        let a = quality_args_crf(&e, QualityProfile::Balanced, 2, Some(30)).join(" ");
+        assert!(a.contains("-qp 120"), "{a}");
+        let a = quality_args_crf(&e, QualityProfile::Balanced, 2, Some(63)).join(" ");
+        assert!(a.contains("-qp 252"), "{a}");
     }
 
     #[test]

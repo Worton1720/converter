@@ -22,8 +22,9 @@ use converter_core::governor::{Governor, GovernorStatus, LoadLevel};
 use converter_core::hw;
 use converter_core::media::ImageKind;
 use converter_core::options::{
-    ConflictPolicy, ConvertOptions, HwBackend, HwPreference, ImageFormat, MetadataPolicy,
-    OutputDir, PngCompression, QualityProfile, SourcePolicy, VideoMode, WebmCodec,
+    AudioFormat, ConflictPolicy, ConvertOptions, HwBackend, HwPreference, ImageFormat, ManualCodec,
+    ManualContainer, ManualVideo, MetadataPolicy, OutputDir, PngCompression, QualityProfile,
+    SourcePolicy, VideoMode, WebmCodec,
 };
 use converter_core::scan::{self, ScanOptions};
 
@@ -104,6 +105,27 @@ enum VideoArg {
     WebmVp9,
     /// Копирование потоков в MKV
     Mkv,
+    /// Только звук в MP3
+    Mp3,
+    /// Только звук в M4A (AAC)
+    M4a,
+    /// Ручной режим: --codec, --container, --crf, --short-side, --fps
+    Manual,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum CodecArg {
+    H264,
+    Hevc,
+    Av1,
+    Vp9,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ContainerArg {
+    Mp4,
+    Mkv,
+    Webm,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -170,6 +192,24 @@ struct ConvertArgs {
     /// Режим видео
     #[arg(long, value_enum, default_value = "compat")]
     video: VideoArg,
+    /// Ручной режим: кодек
+    #[arg(long, value_enum, default_value = "h264")]
+    codec: CodecArg,
+    /// Ручной режим: контейнер
+    #[arg(long, value_enum, default_value = "mp4")]
+    container: ContainerArg,
+    /// Ручной режим: CRF/QP (меньше — лучше); по умолчанию — по --profile
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=63))]
+    crf: Option<u8>,
+    /// Ручной режим: меньшая сторона кадра, только уменьшение (720, 1080…)
+    #[arg(long, value_parser = clap::value_parser!(u32).range(144..))]
+    short_side: Option<u32>,
+    /// Ручной режим: частота кадров
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=240))]
+    fps: Option<u32>,
+    /// Битрейт звука при перекодировании, кбит/с
+    #[arg(long, default_value_t = 192)]
+    audio_kbps: u32,
     /// Профиль качества видео
     #[arg(long, value_enum, default_value = "balanced")]
     profile: ProfileArg,
@@ -434,7 +474,26 @@ fn convert_options(a: &ConvertArgs) -> ConvertOptions {
         VideoArg::Webm => VideoMode::Webm(WebmCodec::Av1),
         VideoArg::WebmVp9 => VideoMode::Webm(WebmCodec::Vp9),
         VideoArg::Mkv => VideoMode::Mkv,
+        VideoArg::Mp3 => VideoMode::Audio(AudioFormat::Mp3),
+        VideoArg::M4a => VideoMode::Audio(AudioFormat::M4a),
+        VideoArg::Manual => VideoMode::Manual(ManualVideo {
+            codec: match a.codec {
+                CodecArg::H264 => ManualCodec::H264,
+                CodecArg::Hevc => ManualCodec::Hevc,
+                CodecArg::Av1 => ManualCodec::Av1,
+                CodecArg::Vp9 => ManualCodec::Vp9,
+            },
+            container: match a.container {
+                ContainerArg::Mp4 => ManualContainer::Mp4,
+                ContainerArg::Mkv => ManualContainer::Mkv,
+                ContainerArg::Webm => ManualContainer::Webm,
+            },
+            crf: a.crf,
+            short_side: a.short_side,
+            fps: a.fps,
+        }),
     };
+    o.video.audio_bitrate_kbps = a.audio_kbps;
     o.video.quality = match a.profile {
         ProfileArg::Fast => QualityProfile::Fast,
         ProfileArg::Balanced => QualityProfile::Balanced,
