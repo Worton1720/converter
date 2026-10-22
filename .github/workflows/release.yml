@@ -91,10 +91,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: C:\vcpkg\installed
-          key: vcpkg-libheif-${{ runner.os }}-${{ hashFiles('.github/workflows/*.yml') }}
-          restore-keys: vcpkg-libheif-${{ runner.os }}-
+          key: vcpkg-libheif-de265-${{ runner.os }}-${{ hashFiles('.github/workflows/*.yml') }}
+          restore-keys: vcpkg-libheif-de265-${{ runner.os }}-
       - name: libheif через vcpkg
-        run: vcpkg install libheif:x64-windows
+        run: vcpkg install "libheif[core,libde265]:x64-windows"
       - name: DLL рядом с программой
         shell: pwsh
         run: |
