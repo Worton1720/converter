@@ -11,16 +11,20 @@ use std::time::Duration;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
-use converter_core::dupes::{self, DupAction, DupesOptions, DupesProgress, KeepRule, KindFilter};
+use converter_core::dupes::{
+    self, DupAction, DupesOptions, DupesProgress, GroupKind, KeepRule, KindFilter, Similarity,
+};
 use converter_core::engine::Engine;
 use converter_core::events::{Event, JobOutcome, LogLevel, SourceAction};
 use converter_core::ffmpeg::{FfmpegSource, Tools};
 use converter_core::fs_ops;
 use converter_core::governor::{Governor, GovernorStatus, LoadLevel};
 use converter_core::hw;
+use converter_core::media::ImageKind;
 use converter_core::options::{
-    ConflictPolicy, ConvertOptions, HwBackend, HwPreference, ImageFormat, MetadataPolicy,
-    OutputDir, PngCompression, QualityProfile, SourcePolicy, VideoMode, WebmCodec,
+    AudioFormat, ConflictPolicy, ConvertOptions, HwBackend, HwPreference, ImageFormat, ManualCodec,
+    ManualContainer, ManualVideo, MetadataPolicy, OutputDir, PngCompression, QualityProfile,
+    SourcePolicy, VideoMode, WebmCodec,
 };
 use converter_core::scan::{self, ScanOptions};
 
@@ -101,6 +105,27 @@ enum VideoArg {
     WebmVp9,
     /// Копирование потоков в MKV
     Mkv,
+    /// Только звук в MP3
+    Mp3,
+    /// Только звук в M4A (AAC)
+    M4a,
+    /// Ручной режим: --codec, --container, --crf, --short-side, --fps
+    Manual,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum CodecArg {
+    H264,
+    Hevc,
+    Av1,
+    Vp9,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ContainerArg {
+    Mp4,
+    Mkv,
+    Webm,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -167,6 +192,24 @@ struct ConvertArgs {
     /// Режим видео
     #[arg(long, value_enum, default_value = "compat")]
     video: VideoArg,
+    /// Ручной режим: кодек
+    #[arg(long, value_enum, default_value = "h264")]
+    codec: CodecArg,
+    /// Ручной режим: контейнер
+    #[arg(long, value_enum, default_value = "mp4")]
+    container: ContainerArg,
+    /// Ручной режим: CRF/QP (меньше — лучше); по умолчанию — по --profile
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=63))]
+    crf: Option<u8>,
+    /// Ручной режим: меньшая сторона кадра, только уменьшение (720, 1080…)
+    #[arg(long, value_parser = clap::value_parser!(u32).range(144..))]
+    short_side: Option<u32>,
+    /// Ручной режим: частота кадров
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=240))]
+    fps: Option<u32>,
+    /// Битрейт звука при перекодировании, кбит/с
+    #[arg(long, default_value_t = 192)]
+    audio_kbps: u32,
     /// Профиль качества видео
     #[arg(long, value_enum, default_value = "balanced")]
     profile: ProfileArg,
@@ -210,6 +253,33 @@ enum KeepArg {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
+enum FormatArg {
+    Jpeg,
+    Heic,
+    Png,
+    Webp,
+}
+
+impl FormatArg {
+    fn kind(self) -> ImageKind {
+        match self {
+            FormatArg::Jpeg => ImageKind::Jpeg,
+            FormatArg::Heic => ImageKind::Heif,
+            FormatArg::Png => ImageKind::Png,
+            FormatArg::Webp => ImageKind::Webp,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum SimilarArg {
+    Off,
+    Strict,
+    Normal,
+    Loose,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
 enum ActionArg {
     Report,
     Trash,
@@ -226,6 +296,18 @@ struct DupesArgs {
     /// Оставлять файлы из этих папок (по порядку приоритета); заменяет --keep
     #[arg(long)]
     prefer: Vec<PathBuf>,
+    /// Одно фото в разных форматах (HEIC + JPEG): какой формат оставлять
+    #[arg(long, value_enum, default_value = "jpeg")]
+    keep_format: FormatArg,
+    /// Убирать и лишние форматы одного фото (иначе они только показываются)
+    #[arg(long, conflicts_with = "no_formats")]
+    formats: bool,
+    /// Не искать одно фото в разных форматах
+    #[arg(long)]
+    no_formats: bool,
+    /// Похожие фото (серии, пересжатые копии): только показываются, сами не убираются
+    #[arg(long, value_enum, default_value = "normal")]
+    similar: SimilarArg,
     #[arg(long, value_enum, default_value = "report")]
     action: ActionArg,
     /// Папка для --action move
@@ -392,7 +474,26 @@ fn convert_options(a: &ConvertArgs) -> ConvertOptions {
         VideoArg::Webm => VideoMode::Webm(WebmCodec::Av1),
         VideoArg::WebmVp9 => VideoMode::Webm(WebmCodec::Vp9),
         VideoArg::Mkv => VideoMode::Mkv,
+        VideoArg::Mp3 => VideoMode::Audio(AudioFormat::Mp3),
+        VideoArg::M4a => VideoMode::Audio(AudioFormat::M4a),
+        VideoArg::Manual => VideoMode::Manual(ManualVideo {
+            codec: match a.codec {
+                CodecArg::H264 => ManualCodec::H264,
+                CodecArg::Hevc => ManualCodec::Hevc,
+                CodecArg::Av1 => ManualCodec::Av1,
+                CodecArg::Vp9 => ManualCodec::Vp9,
+            },
+            container: match a.container {
+                ContainerArg::Mp4 => ManualContainer::Mp4,
+                ContainerArg::Mkv => ManualContainer::Mkv,
+                ContainerArg::Webm => ManualContainer::Webm,
+            },
+            crf: a.crf,
+            short_side: a.short_side,
+            fps: a.fps,
+        }),
     };
+    o.video.audio_bitrate_kbps = a.audio_kbps;
     o.video.quality = match a.profile {
         ProfileArg::Fast => QualityProfile::Fast,
         ProfileArg::Balanced => QualityProfile::Balanced,
@@ -626,6 +727,13 @@ fn run_dupes(args: DupesArgs) -> anyhow::Result<ExitCode> {
             KindFilter::All
         },
         use_cache: !args.no_cache,
+        find_formats: !args.no_formats && !args.videos,
+        similar: match args.similar {
+            SimilarArg::Off => Similarity::Off,
+            SimilarArg::Strict => Similarity::Strict,
+            SimilarArg::Normal => Similarity::Normal,
+            SimilarArg::Loose => Similarity::Loose,
+        },
         ..Default::default()
     };
     let bar = ProgressBar::new_spinner();
@@ -640,6 +748,18 @@ fn run_dupes(args: DupesArgs) -> anyhow::Result<ExitCode> {
             total,
             ..
         } => bar.set_message(format!("Быстрая проверка: {done}/{total}")),
+        DupesProgress::Hashing {
+            stage: 4,
+            done,
+            total,
+            ..
+        } => bar.set_message(format!("Сведения о фото: {done}/{total}")),
+        DupesProgress::Hashing {
+            stage: 5,
+            done,
+            total,
+            ..
+        } => bar.set_message(format!("Сравнение фото по изображению: {done}/{total}")),
         DupesProgress::Hashing {
             done,
             total,
@@ -665,38 +785,77 @@ fn run_dupes(args: DupesArgs) -> anyhow::Result<ExitCode> {
     } else {
         KeepRule::PriorityFolders(args.prefer.clone())
     };
+    // Группы «одно фото в разных форматах» убираются только по --formats: файлы в них
+    // разные, и выбор формата — решение человека, а не очевидная лишняя копия.
+    let acts = |g: &dupes::DupGroup| g.kind == GroupKind::Exact || args.formats;
     let marks: Vec<Vec<bool>> = report
         .groups
         .iter()
-        .map(|g| dupes::auto_select(g, &rule))
+        .map(|g| {
+            let m = dupes::auto_select(g, &rule, args.keep_format.kind());
+            if acts(g) { m } else { vec![false; m.len()] }
+        })
         .collect();
 
-    for (g, m) in report.groups.iter().zip(&marks) {
-        println!(
-            "\n{} × {} (освободится {})",
-            g.files.len(),
-            human(g.size),
-            human(g.reclaimable())
-        );
-        for (f, &remove) in g.files.iter().zip(m) {
+    for g in &report.groups {
+        let m = dupes::auto_select(g, &rule, args.keep_format.kind());
+        match g.kind {
+            GroupKind::Exact => println!(
+                "\n{} × {} (освободится {})",
+                g.files.len(),
+                human(g.size),
+                human(g.reclaimable())
+            ),
+            GroupKind::Formats => println!(
+                "\nОдно фото в {} форматах (освободится {}){}",
+                g.files.len(),
+                human(g.reclaimable()),
+                if acts(g) {
+                    ""
+                } else {
+                    " — убрать: --formats"
+                }
+            ),
+            GroupKind::Similar => println!(
+                "\nПохожие фото: {} (не отмечаются — решите сами)",
+                g.files.len()
+            ),
+        }
+        for (f, &remove) in g.files.iter().zip(&m) {
             let links = if f.links.is_empty() {
                 String::new()
             } else {
                 format!(" (+{} жёстк. ссылок на этот же файл)", f.links.len())
             };
+            let format = match (f.format, f.pixels) {
+                (Some(k), Some((w, h))) => format!(" [{}, {w}×{h}, {}]", k.label(), human(f.size)),
+                (Some(k), None) => format!(" [{}, {}]", k.label(), human(f.size)),
+                _ => String::new(),
+            };
             println!(
-                "  {} {}{links}",
+                "  {} {}{format}{links}",
                 if remove { "✗" } else { "✓" },
                 f.path.display()
             );
         }
     }
-    let reclaim: u64 = report.groups.iter().map(|g| g.reclaimable()).sum();
-    let to_remove: usize = marks.iter().map(|m| m.iter().filter(|x| **x).count()).sum();
+    let marked = || {
+        report
+            .groups
+            .iter()
+            .zip(&marks)
+            .flat_map(|(g, m)| g.files.iter().zip(m).filter(|(_, x)| **x))
+    };
+    let reclaim: u64 = marked().map(|(f, _)| f.size).sum();
+    let to_remove = marked().count();
+    let count = |kind| report.groups.iter().filter(|g| g.kind == kind).count();
     println!(
-        "\nПроверено файлов: {}. Групп: {}. Лишних копий: {to_remove}, освободится {}.",
+        "\nПроверено файлов: {}. Групп копий: {}, одно фото в разных форматах: {}, похожих фото: {}. \
+         Будет убрано: {to_remove}, освободится {}.",
         report.scanned,
-        report.groups.len(),
+        count(GroupKind::Exact),
+        count(GroupKind::Formats),
+        count(GroupKind::Similar),
         human(reclaim)
     );
     if report.skipped_cloud > 0 {

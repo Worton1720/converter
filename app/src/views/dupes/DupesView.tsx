@@ -12,7 +12,16 @@ import { api } from "../../lib/api";
 import { basename, bytes, date, dirname, files, plural } from "../../lib/format";
 import { useStore } from "../../lib/store";
 import { useThumb } from "../../lib/thumbs";
-import type { DupAction, DupesProgress, KeepRule, KindFilter } from "../../lib/types";
+import type {
+  DupAction,
+  DupesProgress,
+  DupFile,
+  GroupKind,
+  KeepRule,
+  KindFilter,
+  PhotoKind,
+  Similarity,
+} from "../../lib/types";
 import { Thumb } from "../convert/FileTable";
 import { CompareDialog } from "./Compare";
 
@@ -28,6 +37,27 @@ const splitList = (text: string) =>
     .map((x) => x.trim())
     .filter(Boolean);
 
+/** Что оставлять у одного фото в разных форматах (FR-9.2). */
+const FORMATS: { value: PhotoKind; label: string; hint: string }[] = [
+  { value: "Jpeg", label: "JPEG", hint: "Открывается на любом компьютере и телефоне" },
+  { value: "Heif", label: "HEIC", hint: "Как снимает iPhone: места меньше, но открывается не везде" },
+  { value: "Png", label: "PNG", hint: "Без потери качества, файлы большие" },
+  { value: "Webp", label: "WebP", hint: "Для сайтов и мессенджеров" },
+];
+const formatLabel = (k: PhotoKind) => FORMATS.find((f) => f.value === k)?.label ?? k;
+
+/** Похожие фото (FR-9.1): вместо ползунка «Строго ↔ Мягко» — понятный выбор из четырёх. */
+const SIMILARITY: { value: Similarity; label: string; hint?: string }[] = [
+  { value: "Off", label: "Не искать" },
+  { value: "Strict", label: "Почти одинаковые", hint: "Уменьшенные и пересохранённые копии" },
+  { value: "Normal", label: "Похожие", hint: "Ещё и снимки одной серии" },
+  { value: "Loose", label: "Похожие с большим допуском", hint: "Найдёт больше, но чаще ошибается" },
+];
+
+/** Подпись файла в группах фото: формат, размер в пикселях и в байтах. */
+const photoMeta = (f: DupFile) =>
+  [f.format, f.pixels && `${f.pixels[0]}×${f.pixels[1]}`, bytes(f.size)].filter(Boolean).join(", ");
+
 const RULES: { value: RuleKey; label: string; hint?: string }[] = [
   { value: "Oldest", label: "Самый старый файл" },
   { value: "Newest", label: "Самый новый файл" },
@@ -40,28 +70,41 @@ function progressText(p: DupesProgress | null): { text: string; fraction: number
   if ("Scanning" in p) return { text: `Просматриваю папки, найдено ${files(p.Scanning.found)}`, fraction: null };
   const h = p.Hashing;
   if (h.stage === 2) return { text: `Сравниваю файлы: ${h.done} из ${h.total}`, fraction: h.total ? h.done / h.total : 0 };
+  if (h.stage === 4)
+    return { text: `Читаю сведения о фото: ${h.done} из ${h.total}`, fraction: h.total ? h.done / h.total : 0 };
+  if (h.stage === 5)
+    return {
+      text: `Сравниваю фото по изображению: ${h.done} из ${h.total}`,
+      fraction: h.total ? h.done / h.total : 0,
+    };
   return {
     text: `Проверяю совпадения подробно: ${bytes(h.bytes_done)} из ${bytes(h.bytes_total)}`,
     fraction: h.bytes_total ? h.bytes_done / h.bytes_total : 0,
   };
 }
 
-/** Сколько будет убрано по текущим отметкам. */
+type Totals = { count: number; freed: number; groups: number };
+
+/** Сколько будет убрано по текущим отметкам: всего и отдельно по типам групп. */
 function useTotals() {
   const result = useStore((s) => s.dupes.result);
   const marks = useStore((s) => s.dupes.marks);
   return useMemo(() => {
-    let count = 0;
-    let freed = 0;
-    result?.groups.forEach((g, gi) =>
+    const zero = (): Totals => ({ count: 0, freed: 0, groups: 0 });
+    const t = { all: zero(), Exact: zero(), Formats: zero(), Similar: zero() };
+    result?.groups.forEach((g, gi) => {
+      t[g.kind].groups += 1;
+      t.all.groups += 1;
       g.files.forEach((f, fi) => {
         if (marks[gi]?.[fi]) {
-          count += 1 + f.links;
-          freed += g.size;
+          for (const x of [t.all, t[g.kind]]) {
+            x.count += 1 + f.links;
+            x.freed += f.size;
+          }
         }
-      }),
-    );
-    return { count, freed };
+      });
+    });
+    return t;
   }, [result, marks]);
 }
 
@@ -80,6 +123,8 @@ async function findDuplicates() {
       kinds: ds.kinds,
       exclude: ds.exclude ?? [],
       use_cache: true,
+      find_formats: ds.find_formats ?? true,
+      similar: ds.similar ?? "Normal",
     });
     useStore.getState().setDupes((d) => ({
       ...d,
@@ -100,17 +145,21 @@ async function findDuplicates() {
   }
 }
 
-/** Выполняет действие над отмеченными файлами и убирает их из результата. */
-async function applyMarks(action: DupAction) {
+/** Выполняет действие над отмеченными файлами и убирает их из результата.
+ *  `only` — только группы этого типа: в простом режиме точные копии и одно фото
+ *  в разных форматах убираются разными кнопками. */
+async function applyMarks(action: DupAction, only?: GroupKind) {
   const st = useStore.getState();
+  const groups = st.dupes.result?.groups ?? [];
+  const marks = st.dupes.marks.map((m, gi) => (only && groups[gi]?.kind !== only ? m.map(() => false) : m));
   let freed = 0;
-  st.dupes.result?.groups.forEach((g, gi) =>
-    g.files.forEach((_, fi) => {
-      if (st.dupes.marks[gi]?.[fi]) freed += g.size;
+  groups.forEach((g, gi) =>
+    g.files.forEach((f, fi) => {
+      if (marks[gi]?.[fi]) freed += f.size;
     }),
   );
   try {
-    const results = await api.dupesApply(st.dupes.marks, action);
+    const results = await api.dupesApply(marks, action);
     const ok = new Set(results.filter((r) => !r.error).map((r) => r.path));
     const failed = results.filter((r) => r.error);
     for (const r of failed) useStore.getState().addLog("Error", `${basename(r.path)}: ${r.error}`, r.path);
@@ -153,11 +202,21 @@ export function DupesView() {
     return () => void un.then((f) => f());
   }, [setDupes]);
 
-  return review ? <Review onBack={() => setReview(false)} /> : <Simple onReview={() => setReview(true)} />;
+  /** Ручной разбор; `kind` — сразу к первой группе этого типа. */
+  const openReview = (kind?: GroupKind) => {
+    if (kind)
+      setDupes((d) => {
+        const g = d.result?.groups.findIndex((x) => x.kind === kind) ?? -1;
+        return g >= 0 ? { ...d, focus: { g, f: 0 } } : d;
+      });
+    setReview(true);
+  };
+
+  return review ? <Review onBack={() => setReview(false)} /> : <Simple onReview={openReview} />;
 }
 
 /** Основной режим: три шага одной колонкой (ТЗ 8.5). */
-function Simple({ onReview }: { onReview: () => void }) {
+function Simple({ onReview }: { onReview: (kind?: GroupKind) => void }) {
   const dupes = useStore((s) => s.dupes);
   const setDupes = useStore((s) => s.setDupes);
   const settings = useStore((s) => s.settings);
@@ -189,14 +248,22 @@ function Simple({ onReview }: { onReview: () => void }) {
   const prog = progressText(dupes.progress);
   const addRoots = (list: string[]) => setDupes((d) => ({ ...d, roots: [...new Set([...d.roots, ...list])] }));
   const keepLabel = RULES.find((r) => r.value === ruleKey(ds.keep))!.label.toLowerCase();
+  const keepFormat = ds.keep_format ?? "Jpeg";
 
+  const remark = async (rule: KeepRule, format: PhotoKind) => {
+    if (useStore.getState().dupes.result) {
+      const next = await api.dupesAuto(rule, format);
+      setDupes((d) => ({ ...d, marks: next }));
+    }
+  };
   const setRule = async (key: RuleKey) => {
     const rule: KeepRule = key === "PriorityFolders" ? { PriorityFolders: dupes.roots } : key;
     updateSettings((s) => ({ ...s, dupes: { ...s.dupes, keep: rule } }));
-    if (useStore.getState().dupes.result) {
-      const next = await api.dupesAuto(rule);
-      setDupes((d) => ({ ...d, marks: next }));
-    }
+    await remark(rule, keepFormat);
+  };
+  const setKeepFormat = async (format: PhotoKind) => {
+    updateSettings((s) => ({ ...s, dupes: { ...s.dupes, keep_format: format } }));
+    await remark(ds.keep, format);
   };
 
   return (
@@ -270,21 +337,67 @@ function Simple({ onReview }: { onReview: () => void }) {
               <p className="rounded-lg bg-accent-soft px-4 py-3 text-[16px] leading-relaxed">{dupes.notice}</p>
             )}
             {groups > 0 && (
-              <div className="space-y-4">
-                <p className="text-[18px] leading-relaxed">
-                  Нашлось {totals.count} {plural(totals.count, "лишняя копия", "лишние копии", "лишних копий")} одинаковых
-                  файлов. Если их убрать, освободится{" "}
-                  <span className="font-semibold">{bytes(totals.freed)}</span>. В каждой группе останется {keepLabel}.
-                </p>
-                <div className="flex flex-wrap gap-3">
-                  <Button variant="primary" size="lg" disabled={!totals.count} onClick={() => void applyMarks("Trash")}>
-                    Убрать лишние копии в корзину
-                  </Button>
-                  <Button size="lg" onClick={onReview}>
+              <div className="space-y-5">
+                {totals.Exact.groups > 0 && (
+                  <div className="space-y-4">
+                    <p className="text-[18px] leading-relaxed">
+                      Нашлось {totals.Exact.count}{" "}
+                      {plural(totals.Exact.count, "лишняя копия", "лишние копии", "лишних копий")} одинаковых файлов.
+                      Если их убрать, освободится <span className="font-semibold">{bytes(totals.Exact.freed)}</span>. В
+                      каждой группе останется {keepLabel}.
+                    </p>
+                    <Button
+                      variant="primary"
+                      size="lg"
+                      disabled={!totals.Exact.count}
+                      onClick={() => void applyMarks("Trash", "Exact")}
+                    >
+                      Убрать лишние копии в корзину
+                    </Button>
+                  </div>
+                )}
+                {totals.Formats.groups > 0 && (
+                  <div className="space-y-4 rounded-lg border border-line bg-surface px-5 py-4">
+                    <p className="text-[18px] leading-relaxed">
+                      {totals.Exact.groups > 0 ? "Ещё " : ""}
+                      {totals.Formats.groups}{" "}
+                      {plural(totals.Formats.groups, "фото сохранено", "фото сохранены", "фото сохранены")} в нескольких
+                      форматах: например, снимок с телефона и его копия JPEG. Это не одинаковые файлы, а одно и то же
+                      фото. Если оставить у каждого только {formatLabel(keepFormat)}, освободится{" "}
+                      <span className="font-semibold">{bytes(totals.Formats.freed)}</span>.
+                    </p>
+                    <Button
+                      variant={totals.Exact.groups > 0 ? "secondary" : "primary"}
+                      size="lg"
+                      disabled={!totals.Formats.count}
+                      onClick={() => void applyMarks("Trash", "Formats")}
+                    >
+                      Оставить только {formatLabel(keepFormat)}, остальное в корзину
+                    </Button>
+                    <p className="text-[14px] text-muted">
+                      Какой формат оставлять, можно выбрать в расширенных настройках ниже.
+                    </p>
+                  </div>
+                )}
+                {totals.Similar.groups > 0 && (
+                  <div className="space-y-4 rounded-lg border border-line bg-surface px-5 py-4">
+                    <p className="text-[18px] leading-relaxed">
+                      {totals.Similar.groups}{" "}
+                      {plural(totals.Similar.groups, "группа похожих фото", "группы похожих фото", "групп похожих фото")}:
+                      снимки одной серии, уменьшенные или пересохранённые копии. Это разные файлы, поэтому программа сама
+                      их не отмечает. Посмотрите и отметьте лишние вручную.
+                    </p>
+                    <Button size="lg" onClick={() => onReview("Similar")}>
+                      Посмотреть похожие фото
+                    </Button>
+                  </div>
+                )}
+                <div className="flex flex-wrap items-center gap-3">
+                  <Button size="lg" onClick={() => onReview()}>
                     Посмотреть и выбрать вручную
                   </Button>
+                  <p className="text-[14px] text-muted">Из корзины файлы можно вернуть, если передумаете.</p>
                 </div>
-                <p className="text-[14px] text-muted">Из корзины файлы можно вернуть, если передумаете.</p>
               </div>
             )}
           </section>
@@ -296,6 +409,9 @@ function Simple({ onReview }: { onReview: () => void }) {
           className="border-t border-line"
           changed={[
             ruleKey(ds.keep) !== "Oldest" && "что оставлять",
+            ds.find_formats === false && "без поиска одного фото в разных форматах",
+            keepFormat !== "Jpeg" && "какой формат оставлять",
+            (ds.similar ?? "Normal") !== "Normal" && "похожие фото",
             kindKey(ds.kinds) !== "All" && "какие файлы",
             ds.min_size !== 1024 && "минимальный размер",
             (ds.exclude ?? []).length > 0 && "исключения",
@@ -306,6 +422,27 @@ function Simple({ onReview }: { onReview: () => void }) {
           <div className="space-y-5 pb-4">
             <Field label="Что оставлять в каждой группе">
               <Select<RuleKey> value={ruleKey(ds.keep)} onChange={(k) => void setRule(k)} options={RULES} />
+            </Field>
+            <Switch
+              checked={ds.find_formats ?? true}
+              onChange={(v) => updateSettings((s) => ({ ...s, dupes: { ...s.dupes, find_formats: v } }))}
+              label="Искать одно фото, сохранённое в разных форматах"
+              hint="Например, снимок с iPhone и его копию JPEG после преобразования"
+            />
+            {(ds.find_formats ?? true) && (
+              <Field label="Если одно фото сохранено в разных форматах, оставлять">
+                <Select<PhotoKind> value={keepFormat} onChange={(k) => void setKeepFormat(k)} options={FORMATS} />
+              </Field>
+            )}
+            <Field
+              label="Похожие фото"
+              hint="Серии снимков, уменьшенные и пересохранённые копии. Программа их сама не отмечает. Фото с телефона проверяются быстро, остальные — дольше."
+            >
+              <Select<Similarity>
+                value={ds.similar ?? "Normal"}
+                onChange={(v) => updateSettings((s) => ({ ...s, dupes: { ...s.dupes, similar: v } }))}
+                options={SIMILARITY}
+              />
             </Field>
             <Field label="Какие файлы сравнивать">
               <Select
@@ -427,6 +564,14 @@ function Review({ onBack }: { onBack: () => void }) {
     overscan: 12,
   });
 
+  // Только при открытии — к выбранной группе: «Посмотреть похожие фото» ведёт сразу к ним.
+  useEffect(() => {
+    const focus = useStore.getState().dupes.focus;
+    if (!focus) return;
+    const idx = flat.findIndex((r) => r.type === "group" && r.g === focus.g);
+    if (idx > 0) virtualizer.scrollToIndex(idx, { align: "start" });
+  }, []);
+
   const toggle = (g: number, f: number) => {
     const group = marks[g];
     if (!group) return;
@@ -526,9 +671,20 @@ function Review({ onBack }: { onBack: () => void }) {
                 if (row.type === "group") {
                   return (
                     <div key={`g${row.g}`} style={style} className="flex items-end px-5 pb-2 text-[16px] font-semibold">
-                      {group.files.length}{" "}
-                      {plural(group.files.length, "одинаковый файл", "одинаковых файла", "одинаковых файлов")} по{" "}
-                      {bytes(group.size)}
+                      {group.kind === "Formats" ? (
+                        <>Одно фото в {group.files.length} {plural(group.files.length, "формате", "форматах", "форматах")}</>
+                      ) : group.kind === "Similar" ? (
+                        <>
+                          {group.files.length} {plural(group.files.length, "похожее фото", "похожих фото", "похожих фото")}{" "}
+                          — сами не отмечены
+                        </>
+                      ) : (
+                        <>
+                          {group.files.length}{" "}
+                          {plural(group.files.length, "одинаковый файл", "одинаковых файла", "одинаковых файлов")} по{" "}
+                          {bytes(group.size)}
+                        </>
+                      )}
                     </div>
                   );
                 }
@@ -557,7 +713,9 @@ function Review({ onBack }: { onBack: () => void }) {
                           ` (ещё ${file.links} ${plural(file.links, "ссылка", "ссылки", "ссылок")} на этот же файл)`}
                       </div>
                     </div>
-                    <span className="w-44 shrink-0 text-right text-[14px] text-muted tabular-nums">{date(file.mtimeMs)}</span>
+                    <span className="w-44 shrink-0 text-right text-[14px] text-muted tabular-nums">
+                      {group.kind === "Exact" ? date(file.mtimeMs) : photoMeta(file)}
+                    </span>
                     <span className={clsx("w-24 shrink-0 text-right text-[16px] font-medium", marked ? "text-err" : "text-ok")}>
                       {marked ? "убрать" : "оставить"}
                     </span>
@@ -570,9 +728,9 @@ function Review({ onBack }: { onBack: () => void }) {
         {result && result.groups.length > 0 && (
           <div className="flex shrink-0 flex-wrap items-center gap-3 border-t border-line bg-surface px-5 py-3">
             <div className="min-w-0 flex-1 text-[16px]">
-              {totals.count > 0 ? (
+              {totals.all.count > 0 ? (
                 <>
-                  Будет убрано {files(totals.count)}, освободится <span className="font-semibold">{bytes(totals.freed)}</span>
+                  Будет убрано {files(totals.all.count)}, освободится <span className="font-semibold">{bytes(totals.all.freed)}</span>
                 </>
               ) : (
                 <span className="text-muted">Отметьте крестиком копии, которые не нужны</span>
@@ -592,7 +750,7 @@ function Review({ onBack }: { onBack: () => void }) {
             </div>
             <Button
               variant={action === "Delete" ? "danger" : "primary"}
-              disabled={totals.count === 0}
+              disabled={totals.all.count === 0}
               onClick={() => (action === "Delete" ? setConfirm(true) : void apply())}
             >
               {actionLabel}
@@ -643,13 +801,13 @@ function Review({ onBack }: { onBack: () => void }) {
               Не удалять
             </Button>
             <Button variant="danger" onClick={() => void apply()}>
-              Удалить {files(totals.count)}
+              Удалить {files(totals.all.count)}
             </Button>
           </>
         }
       >
         <p className="leading-relaxed">
-          {files(totals.count)} будут удалены без корзины, вернуть их будет нельзя. В каждой группе останется по одному
+          {files(totals.all.count)} будут удалены без корзины, вернуть их будет нельзя. В каждой группе останется по одному
           файлу. Если сомневаетесь, выберите «Убрать в корзину».
         </p>
       </Dialog>

@@ -82,7 +82,11 @@ export function CompareDialog({
     to.current.scrollTop = from.current.scrollTop;
     requestAnimationFrame(() => (syncing.current = false));
   };
-  const meta = (f: number) => `${bytes(group.files[f].size)}, изменён ${date(group.files[f].mtimeMs)}`;
+  const meta = (f: number) => {
+    const file = group.files[f];
+    const pixels = file.pixels ? `${file.pixels[0]}×${file.pixels[1]}, ` : "";
+    return `${file.format ? `${file.format}, ` : ""}${pixels}${bytes(file.size)}, изменён ${date(file.mtimeMs)}`;
+  };
 
   return (
     <Dialog
@@ -114,7 +118,11 @@ export function CompareDialog({
       }
     >
       <p className="mb-4 text-[16px] text-muted">
-        Содержимое этих файлов полностью совпадает. При увеличении обе картинки двигаются вместе.
+        {group.kind === "Formats"
+          ? "Это одно и то же фото в разных форматах: файлы не одинаковые, качество может немного отличаться. Увеличьте, чтобы сравнить, — обе картинки двигаются вместе."
+          : group.kind === "Similar"
+            ? "Эти фото похожи, но не одинаковы: это может быть соседний снимок серии или уменьшенная копия. Увеличьте, чтобы сравнить, — обе картинки двигаются вместе."
+            : "Содержимое этих файлов полностью совпадает. При увеличении обе картинки двигаются вместе."}
       </p>
       <div className="grid grid-cols-2 gap-5">
         <Side

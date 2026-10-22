@@ -90,6 +90,10 @@ pub enum VideoMode {
     Webm(WebmCodec),
     /// Копирование потоков в MKV.
     Mkv,
+    /// Только звук из видео (раздел 4.2).
+    Audio(AudioFormat),
+    /// Ручной режим для опытных (FR-3.1).
+    Manual(ManualVideo),
 }
 
 impl VideoMode {
@@ -98,6 +102,65 @@ impl VideoMode {
             VideoMode::Compat | VideoMode::Compact => "mp4",
             VideoMode::Webm(_) => "webm",
             VideoMode::Mkv => "mkv",
+            VideoMode::Audio(AudioFormat::Mp3) => "mp3",
+            VideoMode::Audio(AudioFormat::M4a) => "m4a",
+            VideoMode::Manual(m) => match m.container {
+                ManualContainer::Mp4 => "mp4",
+                ManualContainer::Mkv => "mkv",
+                ManualContainer::Webm => "webm",
+            },
+        }
+    }
+}
+
+/// Формат файла со звуком из видео.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AudioFormat {
+    /// MP3 — открывается везде.
+    Mp3,
+    /// M4A (AAC) — лучше звучит при том же размере.
+    M4a,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ManualCodec {
+    H264,
+    Hevc,
+    Av1,
+    Vp9,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ManualContainer {
+    Mp4,
+    Mkv,
+    Webm,
+}
+
+/// Ручной режим видео: всё задаёт пользователь, видео всегда перекодируется.
+/// Пресет скорости — общий профиль качества (`VideoOptions::quality`), битрейт звука —
+/// `VideoOptions::audio_bitrate_kbps`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ManualVideo {
+    pub codec: ManualCodec,
+    pub container: ManualContainer,
+    /// CRF (у аппаратных кодировщиков — QP): меньше — лучше и больше. `None` — по профилю.
+    pub crf: Option<u8>,
+    /// Меньшая сторона кадра (720, 1080…), только уменьшение. `None` — как в исходнике.
+    pub short_side: Option<u32>,
+    /// Частота кадров. `None` — как в исходнике (в том числе переменная).
+    pub fps: Option<u32>,
+}
+
+impl Default for ManualVideo {
+    fn default() -> Self {
+        Self {
+            codec: ManualCodec::H264,
+            container: ManualContainer::Mp4,
+            crf: None,
+            short_side: None,
+            fps: None,
         }
     }
 }

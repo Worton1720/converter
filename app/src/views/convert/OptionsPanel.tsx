@@ -9,6 +9,7 @@ import type {
   ConvertOptions,
   HwPreference,
   ImageFormat,
+  ManualVideo,
   MetadataPolicy,
   OutputDir,
   QualityProfile,
@@ -25,7 +26,9 @@ function Group({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-const videoModeKey = (m: VideoMode) => (typeof m === "object" ? `Webm${m.Webm}` : m);
+const videoModeKey = (m: VideoMode) =>
+  typeof m === "string" ? m : "Webm" in m ? `Webm${m.Webm}` : "Audio" in m ? `Audio${m.Audio}` : "Manual";
+const DEFAULT_MANUAL: ManualVideo = { codec: "H264", container: "Mp4", crf: null, short_side: null, fps: null };
 const VIDEO_MODES: { value: string; mode: VideoMode; label: string; hint: string; summary: string }[] = [
   {
     value: "Compat",
@@ -44,6 +47,34 @@ const VIDEO_MODES: { value: string; mode: VideoMode; label: string; hint: string
   { value: "WebmAv1", mode: { Webm: "Av1" }, label: "Для сайтов (WebM)", hint: "Для загрузки на сайты и в браузер", summary: "Видео подготовятся для сайтов." },
   { value: "WebmVp9", mode: { Webm: "Vp9" }, label: "Для старых сайтов (WebM VP9)", hint: "Делается долго", summary: "Видео подготовятся для старых сайтов." },
   { value: "Mkv", mode: "Mkv", label: "Без изменений (MKV)", hint: "Быстро, качество не меняется", summary: "Видео не изменятся, сменится только формат файла." },
+  {
+    value: "AudioMp3",
+    mode: { Audio: "Mp3" },
+    label: "Только звук (MP3)",
+    hint: "Например, песня или голос из видео. Открывается везде",
+    summary: "Из видео сохранится только звук в формате MP3.",
+  },
+  {
+    value: "AudioM4a",
+    mode: { Audio: "M4a" },
+    label: "Только звук (M4A)",
+    hint: "Звучит лучше MP3 при том же размере",
+    summary: "Из видео сохранится только звук в формате M4A.",
+  },
+  {
+    value: "Manual",
+    mode: { Manual: DEFAULT_MANUAL },
+    label: "Свои настройки (для опытных)",
+    hint: "Кодек, качество, размер кадра — в расширенных настройках",
+    summary: "Видео перекодируются по вашим настройкам.",
+  },
+];
+
+const MANUAL_CODECS: { value: ManualVideo["codec"]; label: string; hint?: string }[] = [
+  { value: "H264", label: "H.264", hint: "Совместимость везде" },
+  { value: "Hevc", label: "HEVC (H.265)", hint: "Вдвое меньше H.264" },
+  { value: "Av1", label: "AV1", hint: "Ещё меньше, нужен современный плеер" },
+  { value: "Vp9", label: "VP9", hint: "Только процессором, медленно" },
 ];
 
 const IMAGE_FORMATS: { value: ImageFormat; label: string; hint: string }[] = [
@@ -110,6 +141,88 @@ function changedAdvanced(o: ConvertOptions): string[] {
   return out;
 }
 
+/** Число в списке: «как в исходнике» хранится как `null`. */
+const SAME = "same";
+const numOrNull = (v: string) => (v === SAME ? null : Number(v));
+const numKey = (n: number | null) => (n === null ? SAME : String(n));
+
+/** Ручной режим видео (FR-3.1) — только в расширенных настройках. */
+function ManualVideoFields({ value, onChange }: { value: ManualVideo; onChange: (m: ManualVideo) => void }) {
+  const webmOk = value.codec === "Av1" || value.codec === "Vp9";
+  return (
+    <>
+      <Field label="Кодек">
+        <Select<ManualVideo["codec"]>
+          value={value.codec}
+          onChange={(codec) => {
+            const ok = codec === "Av1" || codec === "Vp9";
+            onChange({ ...value, codec, container: value.container === "Webm" && !ok ? "Mp4" : value.container });
+          }}
+          options={MANUAL_CODECS}
+        />
+      </Field>
+      <Field label="Формат файла">
+        <Select<ManualVideo["container"]>
+          value={value.container}
+          onChange={(container) => onChange({ ...value, container })}
+          options={[
+            { value: "Mp4", label: "MP4", hint: "Открывается везде" },
+            { value: "Mkv", label: "MKV", hint: "Сохраняет все дорожки звука и субтитры" },
+            ...(webmOk ? [{ value: "Webm" as const, label: "WebM", hint: "Для сайтов и браузера" }] : []),
+          ]}
+        />
+      </Field>
+      <Field label="Качество (CRF)" hint="Меньше число — лучше качество и больше файл.">
+        <Select
+          value={numKey(value.crf)}
+          onChange={(v) => onChange({ ...value, crf: numOrNull(v) })}
+          options={[
+            { value: SAME, label: "По профилю ниже" },
+            { value: "16", label: "16 — почти без потерь" },
+            { value: "20", label: "20" },
+            { value: "23", label: "23 — обычно для H.264" },
+            { value: "26", label: "26" },
+            { value: "28", label: "28 — обычно для HEVC" },
+            { value: "32", label: "32 — обычно для AV1" },
+            { value: "36", label: "36" },
+            { value: "40", label: "40 — маленький файл" },
+          ]}
+        />
+      </Field>
+      <Field label="Размер кадра" hint="Только уменьшение; вертикальные видео тоже учитываются.">
+        <Select
+          value={numKey(value.short_side)}
+          onChange={(v) => onChange({ ...value, short_side: numOrNull(v) })}
+          options={[
+            { value: SAME, label: "Как в исходнике" },
+            { value: "2160", label: "4K (2160)" },
+            { value: "1440", label: "1440" },
+            { value: "1080", label: "Full HD (1080)" },
+            { value: "720", label: "HD (720)" },
+            { value: "480", label: "480" },
+            { value: "360", label: "360" },
+          ]}
+        />
+      </Field>
+      <Field label="Кадров в секунду">
+        <Select
+          value={numKey(value.fps)}
+          onChange={(v) => onChange({ ...value, fps: numOrNull(v) })}
+          options={[
+            { value: SAME, label: "Как в исходнике" },
+            { value: "60", label: "60" },
+            { value: "50", label: "50" },
+            { value: "30", label: "30" },
+            { value: "25", label: "25" },
+            { value: "24", label: "24" },
+            { value: "15", label: "15" },
+          ]}
+        />
+      </Field>
+    </>
+  );
+}
+
 export function OptionsPanel() {
   const options = useStore((s) => s.settings?.convert);
   const info = useStore((s) => s.info);
@@ -135,6 +248,9 @@ export function OptionsPanel() {
 
   const backends = [...new Set(info?.hw.map((h) => h.backend) ?? [])];
   const hwKey = typeof options.video.hw === "object" ? options.video.hw.Only : options.video.hw;
+  const mode = options.video.mode;
+  const manual = typeof mode === "object" && "Manual" in mode ? mode.Manual : null;
+  const setManual = (m: ManualVideo) => set((o) => ({ ...o, video: { ...o.video, mode: { Manual: m } } }));
   const autoLabel = backends.length ? `Автоматически (${backends[0]})` : "Автоматически (не найдена)";
 
   const pickDir = async () => {
@@ -169,6 +285,11 @@ export function OptionsPanel() {
               options={VIDEO_MODES.map(({ value, label, hint }) => ({ value, label, hint }))}
             />
           </Field>
+          {manual && (
+            <p className="-mt-2 text-[14px] text-muted">
+              Кодек, качество и размер кадра — в «Расширенных настройках» ниже, раздел «Видео».
+            </p>
+          )}
 
           <Field
             label="Куда сохранить"
@@ -291,7 +412,8 @@ export function OptionsPanel() {
           </Group>
 
           <Group title="Видео">
-            <Field label="Качество">
+            {manual && <ManualVideoFields value={manual} onChange={setManual} />}
+            <Field label={manual ? "Скорость кодирования" : "Качество"}>
               <Select<QualityProfile>
                 value={options.video.quality}
                 onChange={(quality) => set((o) => ({ ...o, video: { ...o.video, quality } }))}

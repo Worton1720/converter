@@ -585,9 +585,15 @@ fn run_image(
     }
 }
 
-fn verify_video(tools: &Tools, path: &Path, expected: Option<f64>) -> Result<()> {
+/// Проверка результата: нужный поток есть, длительность совпадает с исходником.
+/// `audio_only` — результат «только звук» (MP3/M4A).
+fn verify_video(tools: &Tools, path: &Path, expected: Option<f64>, audio_only: bool) -> Result<()> {
     let info = probe::probe(tools, path).map_err(|e| Error::Verify(e.to_string()))?;
-    if info.main_video().is_none() {
+    if audio_only {
+        if info.first_decodable_audio().is_none() {
+            return Err(Error::Verify("в результате нет звука".into()));
+        }
+    } else if info.main_video().is_none() {
         return Err(Error::Verify("в результате нет видеопотока".into()));
     }
     if let (Some(src), Some(out)) = (expected, info.duration) {
@@ -642,7 +648,10 @@ fn run_video(ctx: &Ctx, job: &Job, plan: &VideoPlan, permit: &Permit) -> WorkRes
                 speed: p.speed,
             });
         })
-        .and_then(|()| verify_video(&ctx.tools, temp.path(), info.duration));
+        .and_then(|()| {
+            let audio_only = plan.video == video::VideoAction::Drop;
+            verify_video(&ctx.tools, temp.path(), info.duration, audio_only)
+        });
         match result {
             Ok(()) => {
                 let mut operation = plan.label();
@@ -731,6 +740,11 @@ pub fn estimate_bytes(item: &MediaItem, opts: &ConvertOptions) -> u64 {
         MediaKind::Video => match (&item.video, opts.skip_live_photo_video, &item.live_photo) {
             (_, true, LivePhoto::VideoOf(_)) => 0,
             (Some(info), ..) => match video::plan(info, &opts.video, &HwCaps::default(), true) {
+                // Только звук: по битрейту (при копировании дорожки — примерно так же).
+                Ok(plan) if plan.video == video::VideoAction::Drop => {
+                    let kbps = u64::from(opts.video.audio_bitrate_kbps.max(128));
+                    (info.duration.unwrap_or(0.0) * (kbps * 1000 / 8) as f64) as u64
+                }
                 Ok(plan) if plan.is_remux() => item.size,
                 _ => item.size * 6 / 5,
             },
@@ -807,6 +821,9 @@ mod tests {
                 subtitles: vec![],
                 keep_hdr: false,
                 warnings: vec![],
+                crf: None,
+                short_side: None,
+                fps: None,
             }),
         }
     }

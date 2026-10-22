@@ -1,4 +1,6 @@
-//! Поиск точных дубликатов (раздел 5 ТЗ): размер → частичный хэш → полный BLAKE3.
+//! Поиск дубликатов (раздел 5 ТЗ): точные копии — размер → частичный хэш → полный BLAKE3;
+//! «одно фото в разных форматах» — размер в пикселях и дата съёмки → отпечаток картинки (FR-9.2);
+//! похожие фото — отпечаток каждого фото, по желанию пользователя (FR-9.1, FR-9.3).
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -8,15 +10,19 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::UNIX_EPOCH;
 
+use ::image::DynamicImage;
+use ::image::imageops::FilterType;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 use crate::error::{Error, IoContext, Result};
 use crate::governor::Governor;
-use crate::media::{self, MediaKind};
+use crate::media::{self, ImageKind, MediaKind};
 use crate::paths;
+use crate::photo;
 use crate::scan::canonical;
 use crate::sys;
+use crate::thumb;
 
 const PARTIAL_CHUNK: u64 = 64 * 1024;
 const READERS_SSD: usize = 4;
@@ -42,6 +48,40 @@ pub struct DupesOptions {
     /// Исключения: путь содержит одну из подстрок.
     pub exclude: Vec<String>,
     pub use_cache: bool,
+    /// Искать ещё и одно фото, сохранённое в разных форматах (FR-9.2).
+    #[serde(default = "yes")]
+    pub find_formats: bool,
+    /// Искать похожие фото и насколько строго (FR-9.1).
+    #[serde(default)]
+    pub similar: Similarity,
+}
+
+/// Насколько похожими должны быть фото, чтобы попасть в одну группу (FR-9.1).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Similarity {
+    /// Не искать: нужно открыть каждое фото, это долго.
+    #[default]
+    Off,
+    Strict,
+    Normal,
+    Loose,
+}
+
+impl Similarity {
+    /// Наибольшее расстояние Хэмминга между 64-битными dHash. У случайной пары фото оно
+    /// около 32; у кадров серии и пересжатых копий — единицы.
+    fn max_distance(self) -> Option<u32> {
+        match self {
+            Similarity::Off => None,
+            Similarity::Strict => Some(5),
+            Similarity::Normal => Some(9),
+            Similarity::Loose => Some(13),
+        }
+    }
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Default for DupesOptions {
@@ -55,6 +95,8 @@ impl Default for DupesOptions {
             kinds: KindFilter::All,
             exclude: Vec::new(),
             use_cache: true,
+            find_formats: true,
+            similar: Similarity::Off,
         }
     }
 }
@@ -70,19 +112,55 @@ pub struct FileEntry {
     /// иначе место не освободится.
     #[serde(default)]
     pub links: Vec<PathBuf>,
+    /// Формат фото — в группах «одно фото в разных форматах» и «похожие фото».
+    #[serde(default)]
+    pub format: Option<ImageKind>,
+    /// Размер в пикселях с учётом поворота — там же.
+    #[serde(default)]
+    pub pixels: Option<(u32, u32)>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GroupKind {
+    /// Файлы совпадают байт в байт.
+    #[default]
+    Exact,
+    /// Одно и то же фото в разных форматах (HEIC + JPEG и т.п.): содержимое файлов разное.
+    Formats,
+    /// Похожие фото: серии снимков, пересжатые и уменьшенные копии. Сами не отмечаются (FR-9.3).
+    Similar,
+}
+
+impl GroupKind {
+    /// Порядок в списке: сначала то, что безопасно убрать.
+    fn order(self) -> u8 {
+        match self {
+            GroupKind::Exact => 0,
+            GroupKind::Formats => 1,
+            GroupKind::Similar => 2,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DupGroup {
+    #[serde(default)]
+    pub kind: GroupKind,
+    /// Размер файла; для групп `Formats` и `Similar` — самого большого из них.
     pub size: u64,
     pub hash: String,
     pub files: Vec<FileEntry>,
 }
 
 impl DupGroup {
-    /// Сколько освободится, если оставить один файл.
+    /// Сколько освободится, если оставить один файл (в `Formats` и `Similar` — самый большой).
     pub fn reclaimable(&self) -> u64 {
-        self.size * (self.files.len() as u64).saturating_sub(1)
+        match self.kind {
+            GroupKind::Exact => self.size * (self.files.len() as u64).saturating_sub(1),
+            GroupKind::Formats | GroupKind::Similar => {
+                self.files.iter().map(|f| f.size).sum::<u64>() - self.size
+            }
+        }
     }
 }
 
@@ -129,6 +207,8 @@ pub fn entry_for(path: &Path) -> Result<FileEntry> {
         mtime_ns: mtime_ns(&meta),
         file_id: None,
         links: Vec::new(),
+        format: None,
+        pixels: None,
     })
 }
 
@@ -141,6 +221,9 @@ struct CacheEntry {
     file_id: Option<String>,
     partial: Option<String>,
     full: Option<String>,
+    /// Отпечаток картинки (dHash) — для фото.
+    #[serde(default)]
+    print: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -180,17 +263,30 @@ impl HashCache {
             .filter(|c| c.size == e.size && c.mtime_ns == e.mtime_ns && c.file_id == e.file_id)
     }
 
-    fn store(&mut self, e: &FileEntry, partial: Option<String>, full: Option<String>) {
-        let entry = self.entries.entry(e.path.clone()).or_insert(CacheEntry {
+    /// Запись для файла в его текущем состоянии. Если файл изменился, прежние хэши
+    /// сбрасываются: иначе устаревший полный хэш выглядел бы действительным.
+    fn entry(&mut self, e: &FileEntry) -> &mut CacheEntry {
+        let fresh = || CacheEntry {
             size: e.size,
             mtime_ns: e.mtime_ns,
             file_id: e.file_id.clone(),
             partial: None,
             full: None,
-        });
-        entry.size = e.size;
-        entry.mtime_ns = e.mtime_ns;
-        entry.file_id = e.file_id.clone();
+            print: None,
+        };
+        let entry = self.entries.entry(e.path.clone()).or_insert_with(fresh);
+        if entry.size != e.size || entry.mtime_ns != e.mtime_ns || entry.file_id != e.file_id {
+            *entry = fresh();
+        }
+        entry
+    }
+
+    fn store_print(&mut self, e: &FileEntry, print: String) {
+        self.entry(e).print = Some(print);
+    }
+
+    fn store(&mut self, e: &FileEntry, partial: Option<String>, full: Option<String>) {
+        let entry = self.entry(e);
         if partial.is_some() {
             entry.partial = partial;
         }
@@ -402,6 +498,8 @@ pub fn find(
                 mtime_ns: mtime_ns(&meta),
                 file_id: None,
                 links: Vec::new(),
+                format: None,
+                pixels: None,
             });
             if all.len().is_multiple_of(1000) {
                 progress(DupesProgress::Scanning { found: all.len() });
@@ -410,6 +508,23 @@ pub fn find(
     }
     report.scanned = all.len();
     progress(DupesProgress::Scanning { found: all.len() });
+
+    // Кандидаты для «одно фото в разных форматах» — до отсева по размеру: их размеры разные.
+    let photos: Vec<FileEntry> = if opts.find_formats || opts.similar != Similarity::Off {
+        all.values()
+            .filter_map(|e| {
+                let kind = photo_kind(&e.path)?;
+                Some(FileEntry {
+                    format: Some(kind),
+                    // Для кэша отпечатков: запись сверяется по размеру, времени и file ID.
+                    file_id: file_id(&e.path),
+                    ..e.clone()
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     // 2. Группировка по размеру, затем схлопывание жёстких ссылок.
     let mut by_size: HashMap<u64, Vec<FileEntry>> = HashMap::new();
@@ -542,28 +657,351 @@ pub fn find(
             Err(err) => report.errors.push((e.path, err.to_string())),
         }
     }
-    if opts.use_cache {
-        cache.save();
-    }
-
     report.groups = by_full
         .into_iter()
         .filter(|(_, v)| v.len() > 1)
         .map(|(hash, mut files)| {
             files.sort_by(|a, b| a.path.cmp(&b.path));
             DupGroup {
+                kind: GroupKind::Exact,
                 size: files[0].size,
                 hash,
                 files,
             }
         })
         .collect();
+
+    // 5. Одно фото в разных форматах и похожие фото. Файлы из точных групп сюда не берутся:
+    // иначе один файл попал бы в две группы и мог бы быть отмечен дважды.
+    if !photos.is_empty() {
+        let in_exact: std::collections::HashSet<&Path> = report
+            .groups
+            .iter()
+            .flat_map(|g| &g.files)
+            .flat_map(|f| std::iter::once(&f.path).chain(&f.links))
+            .map(PathBuf::as_path)
+            .collect();
+        let photos: Vec<FileEntry> = photos
+            .into_iter()
+            .filter(|p| !in_exact.contains(p.path.as_path()))
+            .collect();
+        let found = find_photo_groups(
+            photos,
+            opts.find_formats,
+            opts.similar,
+            &mut cache,
+            governor,
+            &gates,
+            cancel,
+            &progress,
+        )?;
+        report.groups.extend(found);
+    }
+    if opts.use_cache {
+        cache.save();
+    }
     report.groups.sort_by(|a, b| {
-        b.reclaimable()
-            .cmp(&a.reclaimable())
+        (a.kind.order().cmp(&b.kind.order()))
+            .then(b.reclaimable().cmp(&a.reclaimable()))
             .then(a.hash.cmp(&b.hash))
     });
     Ok(report)
+}
+
+// ---------- одно фото в разных форматах (FR-9.2) ----------
+
+const PHOTO_EXTENSIONS: &[&str] = &[
+    "heic", "heif", "hif", "jpg", "jpeg", "png", "webp", "tif", "tiff", "bmp",
+];
+/// Наибольшее расстояние Хэмминга между 64-битными dHash одного фото. Смена формата
+/// и пересжатие дают 0–4; у соседних кадров серии того же размера и секунды — заметно больше.
+const SAME_PHOTO_DISTANCE: u32 = 6;
+
+/// Тип фото по содержимому; файлы с чужими расширениями не открываются вовсе.
+fn photo_kind(path: &Path) -> Option<ImageKind> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    if !PHOTO_EXTENSIONS.contains(&ext.as_str()) {
+        return None;
+    }
+    match media::detect(path)? {
+        MediaKind::Image(kind) => Some(kind),
+        MediaKind::Video => None,
+    }
+}
+
+/// dHash: картинка 9×8 в оттенках серого, бит — «пиксель ярче правого соседа».
+/// Не зависит от формата, сжатия и размера файла.
+fn dhash(img: &DynamicImage) -> u64 {
+    let small = img
+        .thumbnail(256, 256)
+        .resize_exact(9, 8, FilterType::Triangle)
+        .to_luma8();
+    let mut hash = 0u64;
+    for y in 0..8 {
+        for x in 0..8 {
+            hash = hash << 1 | u64::from(small.get_pixel(x, y)[0] > small.get_pixel(x + 1, y)[0]);
+        }
+    }
+    hash
+}
+
+/// Фото после первого прохода: размер в пикселях и дата съёмки из заголовка.
+struct Photo {
+    entry: FileEntry,
+    date: String,
+    print: Option<u64>,
+}
+
+impl Photo {
+    fn aspect(&self) -> f64 {
+        let (w, h) = self.entry.pixels.unwrap_or((1, 1));
+        f64::from(w) / f64::from(h.max(1))
+    }
+}
+
+/// Одно фото в разных форматах (FR-9.2) и, если включено, похожие фото (FR-9.1).
+/// Нечитаемые файлы молча пропускаются — это не поиск ошибок.
+#[allow(clippy::too_many_arguments)]
+fn find_photo_groups(
+    photos: Vec<FileEntry>,
+    find_formats: bool,
+    similar: Similarity,
+    cache: &mut HashCache,
+    governor: &Governor,
+    gates: &DiskGates,
+    cancel: &AtomicBool,
+    progress: &(impl Fn(DupesProgress) + Sync),
+) -> Result<Vec<DupGroup>> {
+    let step = |stage: u8, done: &AtomicUsize, total: usize| {
+        let d = done.fetch_add(1, Ordering::Relaxed) + 1;
+        progress(DupesProgress::Hashing {
+            stage,
+            done: d,
+            total,
+            bytes_done: 0,
+            bytes_total: 0,
+        });
+    };
+    let kind = |e: &FileEntry| e.format.expect("у фото формат заполнен");
+
+    // 1. Размер в пикселях и дата съёмки — по заголовку, без декодирования.
+    let done = AtomicUsize::new(0);
+    let heads = hash_parallel(
+        &photos,
+        governor,
+        gates,
+        cancel,
+        |e| {
+            let (w, h) = photo::dimensions(&e.path, kind(e))
+                .ok_or_else(|| std::io::Error::other("размер не читается"))?;
+            let date = photo::read_date_taken(&e.path, kind(e)).unwrap_or_default();
+            Ok(format!("{w}x{h}|{date}"))
+        },
+        || step(4, &done, photos.len()),
+    );
+    if cancel.load(Ordering::Relaxed) {
+        return Err(Error::Cancelled);
+    }
+    let mut items: Vec<Photo> = photos
+        .into_iter()
+        .zip(heads)
+        .filter_map(|(mut entry, head)| {
+            let head = head.ok()?;
+            let (dims, date) = head.split_once('|')?;
+            let (w, h) = dims.split_once('x')?;
+            entry.pixels = Some((w.parse().ok()?, h.parse().ok()?));
+            Some(Photo {
+                entry,
+                date: date.to_string(),
+                print: None,
+            })
+        })
+        .collect();
+
+    // 2. Кому нужен отпечаток. Для форматов — только файлам, у которых есть возможная пара:
+    // другой формат того же размера и той же даты (в фототеке с тысячами снимков 4032×3024
+    // это единицы). Для похожих фото — всем.
+    let mut by_dims: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+    for (i, p) in items.iter().enumerate() {
+        by_dims.entry(p.entry.pixels.unwrap()).or_default().push(i);
+    }
+    let pairable =
+        |a: &Photo, b: &Photo| a.entry.format != b.entry.format && dates_match(&a.date, &b.date);
+    let mut format_candidates = vec![false; items.len()];
+    if find_formats {
+        for bucket in by_dims.values() {
+            for &i in bucket {
+                format_candidates[i] = bucket.iter().any(|&j| pairable(&items[i], &items[j]));
+            }
+        }
+    }
+    let threshold = similar.max_distance();
+    let need: Vec<usize> = (0..items.len())
+        .filter(|&i| format_candidates[i] || threshold.is_some())
+        .collect();
+
+    // 3. Отпечаток уменьшенной картинки, с кэшем: повторный поиск не открывает фото заново.
+    let to_hash: Vec<FileEntry> = need.iter().map(|&i| items[i].entry.clone()).collect();
+    let done = AtomicUsize::new(0);
+    let prints = {
+        let cache = &*cache;
+        hash_parallel(
+            &to_hash,
+            governor,
+            gates,
+            cancel,
+            |e| match cache.lookup(e).and_then(|c| c.print.clone()) {
+                Some(p) => Ok(p),
+                None => {
+                    let img =
+                        thumb::preview(&e.path, kind(e), 64).map_err(std::io::Error::other)?;
+                    Ok(format!("{:016x}", dhash(&img)))
+                }
+            },
+            || step(5, &done, to_hash.len()),
+        )
+    };
+    if cancel.load(Ordering::Relaxed) {
+        return Err(Error::Cancelled);
+    }
+    for (&i, p) in need.iter().zip(prints) {
+        if let Ok(p) = p {
+            items[i].print = u64::from_str_radix(&p, 16).ok();
+            cache.store_print(&items[i].entry, p);
+        }
+    }
+
+    // 4. Одно фото в разных форматах — внутри одного размера в пикселях.
+    let mut groups = Vec::new();
+    let mut grouped: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    for bucket in by_dims.values() {
+        let members: Vec<(FileEntry, u64, String)> = bucket
+            .iter()
+            .filter(|&&i| format_candidates[i])
+            .filter_map(|&i| {
+                Some((
+                    items[i].entry.clone(),
+                    items[i].print?,
+                    items[i].date.clone(),
+                ))
+            })
+            .collect();
+        for g in cluster_same_photos(members) {
+            grouped.extend(g.files.iter().map(|f| f.path.clone()));
+            groups.push(g);
+        }
+    }
+
+    // 5. Похожие фото — среди оставшихся: файл не должен попасть в две группы.
+    if let Some(threshold) = threshold {
+        let rest: Vec<Photo> = items
+            .into_iter()
+            .filter(|p| p.print.is_some() && !grouped.contains(&p.entry.path))
+            .collect();
+        groups.extend(cluster_similar(rest, threshold));
+    }
+    Ok(groups)
+}
+
+/// Похожие фото: каждое присоединяется к первой группе, чей первый снимок отличается не больше
+/// чем на `threshold` бит и имеет те же пропорции. Сравнение с первым снимком, а не с любым,
+/// не даёт длинной серии «перетечь» в совсем другие кадры. По дате — чтобы серия шла подряд.
+fn cluster_similar(mut photos: Vec<Photo>, threshold: u32) -> Vec<DupGroup> {
+    photos.sort_by(|a, b| a.date.cmp(&b.date).then(a.entry.path.cmp(&b.entry.path)));
+    let mut clusters: Vec<Vec<Photo>> = Vec::new();
+    for p in photos {
+        let print = p.print.expect("отфильтровано");
+        let home = clusters.iter_mut().find(|c| {
+            let lead = &c[0];
+            (lead.print.unwrap() ^ print).count_ones() <= threshold
+                && (lead.aspect() - p.aspect()).abs() <= 0.02 * lead.aspect()
+        });
+        match home {
+            Some(c) => c.push(p),
+            None => clusters.push(vec![p]),
+        }
+    }
+    clusters
+        .into_iter()
+        .filter(|c| c.len() > 1)
+        .map(|c| {
+            let hash = format!("{:016x}", c[0].print.unwrap());
+            let mut files: Vec<FileEntry> = c.into_iter().map(|p| p.entry).collect();
+            files.sort_by(|a, b| a.path.cmp(&b.path));
+            DupGroup {
+                kind: GroupKind::Similar,
+                size: files.iter().map(|f| f.size).max().unwrap_or(0),
+                hash,
+                files,
+            }
+        })
+        .collect()
+}
+
+/// Дата съёмки совпадает или неизвестна у одного из файлов (метаданные могли убрать).
+fn dates_match(a: &str, b: &str) -> bool {
+    a.is_empty() || b.is_empty() || a == b
+}
+
+/// Связывает одно фото в разных форматах и оставляет группы, где есть хотя бы два формата.
+/// Файлы с датой съёмки связываются только с файлами той же даты. Файл без даты
+/// присоединяется к одному, самому похожему: иначе он склеил бы соседние кадры серии
+/// с разными секундами в одну группу.
+fn cluster_same_photos(items: Vec<(FileEntry, u64, String)>) -> Vec<DupGroup> {
+    let n = items.len();
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn root(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    let close = |a: &(FileEntry, u64, String), b: &(FileEntry, u64, String)| {
+        a.0.format != b.0.format && (a.1 ^ b.1).count_ones() <= SAME_PHOTO_DISTANCE
+    };
+    let link = |parent: &mut [usize], i: usize, j: usize| {
+        let (ri, rj) = (root(parent, i), root(parent, j));
+        parent[ri] = rj;
+    };
+    for i in 0..n {
+        for j in i + 1..n {
+            let (a, b) = (&items[i], &items[j]);
+            if !a.2.is_empty() && a.2 == b.2 && close(a, b) {
+                link(&mut parent, i, j);
+            }
+        }
+    }
+    for i in (0..n).filter(|&i| items[i].2.is_empty()) {
+        let best = (0..n)
+            .filter(|&j| j != i && close(&items[i], &items[j]))
+            .min_by_key(|&j| (items[i].1 ^ items[j].1).count_ones());
+        if let Some(j) = best {
+            link(&mut parent, i, j);
+        }
+    }
+    let mut components: HashMap<usize, Vec<(FileEntry, u64)>> = HashMap::new();
+    for (i, (e, hash, _)) in items.into_iter().enumerate() {
+        components
+            .entry(root(&mut parent, i))
+            .or_default()
+            .push((e, hash));
+    }
+    components
+        .into_values()
+        .filter(|c| c.iter().any(|(e, _)| e.format != c[0].0.format))
+        .map(|mut c| {
+            c.sort_by(|a, b| a.0.path.cmp(&b.0.path));
+            let hash = format!("{:016x}", c[0].1);
+            let files: Vec<FileEntry> = c.into_iter().map(|(e, _)| e).collect();
+            DupGroup {
+                kind: GroupKind::Formats,
+                size: files.iter().map(|f| f.size).max().unwrap_or(0),
+                hash,
+                files,
+            }
+        })
+        .collect()
 }
 
 // ---------- выбор и действия (FR-10.3–10.5, 11.x) ----------
@@ -578,16 +1016,25 @@ pub enum KeepRule {
 }
 
 /// Отметки «удалить»: в группе всегда остаётся ровно один неотмеченный файл.
-pub fn auto_select(group: &DupGroup, rule: &KeepRule) -> Vec<bool> {
+/// Точные копии — по правилу `rule`; одно фото в разных форматах — файл формата `prefer`
+/// (FR-9.2), а если такого нет или их несколько — самый большой: в нём больше деталей.
+pub fn auto_select(group: &DupGroup, rule: &KeepRule, prefer: ImageKind) -> Vec<bool> {
+    // Похожие фото — не копии: что убрать, решает человек (FR-9.3).
+    if group.kind == GroupKind::Similar {
+        return vec![false; group.files.len()];
+    }
     let path_len = |f: &FileEntry| f.path.as_os_str().len();
     let keeper = (0..group.files.len())
         .min_by(|&a, &b| {
             let (fa, fb) = (&group.files[a], &group.files[b]);
-            let primary = match rule {
-                KeepRule::Oldest => fa.mtime_ns.cmp(&fb.mtime_ns),
-                KeepRule::Newest => fb.mtime_ns.cmp(&fa.mtime_ns),
-                KeepRule::ShortestPath => path_len(fa).cmp(&path_len(fb)),
-                KeepRule::PriorityFolders(dirs) => {
+            let primary = match (group.kind, rule) {
+                (GroupKind::Formats | GroupKind::Similar, _) => (fa.format != Some(prefer))
+                    .cmp(&(fb.format != Some(prefer)))
+                    .then(fb.size.cmp(&fa.size)),
+                (_, KeepRule::Oldest) => fa.mtime_ns.cmp(&fb.mtime_ns),
+                (_, KeepRule::Newest) => fb.mtime_ns.cmp(&fa.mtime_ns),
+                (_, KeepRule::ShortestPath) => path_len(fa).cmp(&path_len(fb)),
+                (_, KeepRule::PriorityFolders(dirs)) => {
                     let rank = |f: &FileEntry| {
                         dirs.iter()
                             .position(|d| f.path.starts_with(canonical(d)))
@@ -707,7 +1154,7 @@ fn move_into(path: &Path, dir: &Path) -> Result<PathBuf> {
 
 /// Отчёт CSV (FR-11.4).
 pub fn to_csv(groups: &[DupGroup], marks: Option<&[Vec<bool>]>) -> String {
-    let mut out = String::from("group,hash,size,path,mtime_ns,action\n");
+    let mut out = String::from("group,type,hash,size,path,mtime_ns,action\n");
     for (gi, g) in groups.iter().enumerate() {
         for (fi, f) in g.files.iter().enumerate() {
             let marked = marks
@@ -717,10 +1164,15 @@ pub fn to_csv(groups: &[DupGroup], marks: Option<&[Vec<bool>]>) -> String {
                 .unwrap_or(false);
             let path = f.path.to_string_lossy().replace('"', "\"\"");
             out.push_str(&format!(
-                "{},{},{},\"{}\",{},{}\n",
+                "{},{},{},{},\"{}\",{},{}\n",
                 gi + 1,
+                match g.kind {
+                    GroupKind::Exact => "exact",
+                    GroupKind::Formats => "formats",
+                    GroupKind::Similar => "similar",
+                },
                 g.hash,
-                g.size,
+                f.size,
                 path,
                 f.mtime_ns,
                 if marked { "remove" } else { "keep" }
@@ -793,6 +1245,7 @@ mod tests {
 
     fn group(paths: &[(&str, i128)]) -> DupGroup {
         DupGroup {
+            kind: GroupKind::Exact,
             size: 10,
             hash: "abcdef0123456789".into(),
             files: paths
@@ -803,24 +1256,243 @@ mod tests {
                     mtime_ns: *t,
                     file_id: None,
                     links: Vec::new(),
+                    format: None,
+                    pixels: None,
                 })
                 .collect(),
         }
     }
 
+    fn picture(w: u32, h: u32, f: impl Fn(u32, u32) -> u8) -> ::image::RgbImage {
+        ::image::RgbImage::from_fn(w, h, |x, y| {
+            let v = f(x, y);
+            ::image::Rgb([v, v / 2, 255 - v])
+        })
+    }
+
+    #[test]
+    fn finds_same_photo_in_different_formats() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let photo = picture(320, 240, |x, y| ((x + y) % 256) as u8);
+        photo.save(d.join("IMG_1.png")).unwrap();
+        photo.save(d.join("IMG_1.jpg")).unwrap();
+        // Другой снимок того же размера и формата PNG — в группу не попадает.
+        picture(
+            320,
+            240,
+            |x, y| if (x / 40 + y / 40) % 2 == 0 { 30 } else { 220 },
+        )
+        .save(d.join("IMG_2.png"))
+        .unwrap();
+        // Тот же снимок другого размера — тоже не пара.
+        ::image::imageops::thumbnail(&photo, 160, 120)
+            .save(d.join("small.jpg"))
+            .unwrap();
+
+        let gov = Governor::start(LoadLevel::Max, 0);
+        let cancel = AtomicBool::new(false);
+        let report = find(&opts(d), &gov, &cancel, |_| {}).unwrap();
+        gov.shutdown();
+        assert_eq!(report.groups.len(), 1, "{:?}", report.groups);
+        let g = &report.groups[0];
+        assert_eq!(g.kind, GroupKind::Formats);
+        let names: Vec<_> = g
+            .files
+            .iter()
+            .map(|f| f.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["IMG_1.jpg", "IMG_1.png"]);
+        // Оставляется JPEG, отмечается PNG.
+        assert_eq!(
+            auto_select(g, &KeepRule::Oldest, ImageKind::Jpeg),
+            [false, true]
+        );
+        assert_eq!(g.reclaimable(), g.files[1].size.min(g.files[0].size));
+
+        let mut o = opts(d);
+        o.find_formats = false;
+        let gov = Governor::start(LoadLevel::Max, 0);
+        assert!(find(&o, &gov, &cancel, |_| {}).unwrap().groups.is_empty());
+        gov.shutdown();
+    }
+
+    #[test]
+    fn finds_similar_photos_only_when_asked_and_never_marks_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let base = picture(400, 300, |x, y| ((x * 2 + y) % 256) as u8);
+        base.save(d.join("IMG_10.png")).unwrap();
+        // Кадр серии: чуть светлее.
+        let mut next = base.clone();
+        next.pixels_mut()
+            .for_each(|p| p.0.iter_mut().for_each(|c| *c = c.saturating_add(6)));
+        next.save(d.join("IMG_11.png")).unwrap();
+        // Уменьшенная копия тех же пропорций.
+        ::image::imageops::thumbnail(&base, 200, 150)
+            .save(d.join("IMG_10_small.png"))
+            .unwrap();
+        // Совсем другой снимок.
+        picture(
+            400,
+            300,
+            |x, y| if (x / 50 + y / 50) % 2 == 0 { 20 } else { 230 },
+        )
+        .save(d.join("IMG_20.png"))
+        .unwrap();
+
+        let run = |similar| {
+            let mut o = opts(d);
+            o.similar = similar;
+            let gov = Governor::start(LoadLevel::Max, 0);
+            let r = find(&o, &gov, &AtomicBool::new(false), |_| {}).unwrap();
+            gov.shutdown();
+            r
+        };
+        assert!(run(Similarity::Off).groups.is_empty());
+        let report = run(Similarity::Normal);
+        assert_eq!(report.groups.len(), 1, "{:?}", report.groups);
+        let g = &report.groups[0];
+        assert_eq!(g.kind, GroupKind::Similar);
+        let names: Vec<_> = g
+            .files
+            .iter()
+            .map(|f| f.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["IMG_10.png", "IMG_10_small.png", "IMG_11.png"]);
+        assert_eq!(g.files[1].pixels, Some((200, 150)));
+        assert_eq!(
+            auto_select(g, &KeepRule::Oldest, ImageKind::Jpeg),
+            [false, false, false]
+        );
+    }
+
+    #[test]
+    fn cache_forgets_hashes_of_changed_file() {
+        let mut cache = HashCache::default();
+        let mut e = FileEntry {
+            path: PathBuf::from("/photo.jpg"),
+            size: 10,
+            mtime_ns: 1,
+            file_id: None,
+            links: Vec::new(),
+            format: None,
+            pixels: None,
+        };
+        cache.store(&e, Some("p1".into()), Some("f1".into()));
+        cache.store_print(&e, "abc".into());
+        // Файл переписали тем же размером: частичный хэш посчитан заново, полный — ещё нет.
+        e.mtime_ns = 2;
+        cache.store(&e, Some("p2".into()), None);
+        let c = cache.lookup(&e).unwrap();
+        assert_eq!(c.partial.as_deref(), Some("p2"));
+        assert_eq!(
+            c.full, None,
+            "устаревший полный хэш выглядел бы действительным"
+        );
+        assert_eq!(c.print, None);
+    }
+
+    #[test]
+    fn same_photos_need_matching_dates() {
+        let entry = |name: &str, format| FileEntry {
+            path: PathBuf::from(name),
+            size: 1,
+            mtime_ns: 0,
+            file_id: None,
+            links: Vec::new(),
+            format: Some(format),
+            pixels: None,
+        };
+        let groups = cluster_same_photos(vec![
+            (
+                entry("/a.heic", ImageKind::Heif),
+                0xF0F0,
+                "2024:05:01 10:00:00".into(),
+            ),
+            (
+                entry("/a.jpg", ImageKind::Jpeg),
+                0xF0F1,
+                "2024:05:01 10:00:00".into(),
+            ),
+            // Тот же отпечаток, но другая секунда — соседний кадр серии.
+            (
+                entry("/b.jpg", ImageKind::Jpeg),
+                0xF0F0,
+                "2024:05:01 10:00:01".into(),
+            ),
+            // Даты нет — метаданные убраны при конвертации; сравнивается по картинке.
+            (entry("/a.png", ImageKind::Png), 0xF0F0, String::new()),
+        ]);
+        assert_eq!(groups.len(), 1);
+        let mut names: Vec<_> = groups[0].files.iter().map(|f| f.path.clone()).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                Path::new("/a.heic"),
+                Path::new("/a.jpg"),
+                Path::new("/a.png")
+            ]
+        );
+    }
+
+    #[test]
+    fn formats_keep_preferred_then_largest() {
+        let file = |name: &str, format, size| FileEntry {
+            path: PathBuf::from(name),
+            size,
+            mtime_ns: 0,
+            file_id: None,
+            links: Vec::new(),
+            format: Some(format),
+            pixels: None,
+        };
+        let g = DupGroup {
+            kind: GroupKind::Formats,
+            size: 3_000,
+            hash: "0".into(),
+            files: vec![
+                file("/a.heic", ImageKind::Heif, 2_000),
+                file("/a.jpg", ImageKind::Jpeg, 1_000),
+                file("/a.png", ImageKind::Png, 3_000),
+            ],
+        };
+        assert_eq!(
+            auto_select(&g, &KeepRule::Oldest, ImageKind::Jpeg),
+            [true, false, true]
+        );
+        assert_eq!(
+            auto_select(&g, &KeepRule::Oldest, ImageKind::Heif),
+            [false, true, true]
+        );
+        // Нужного формата нет — остаётся самый большой файл.
+        assert_eq!(
+            auto_select(&g, &KeepRule::Oldest, ImageKind::Webp),
+            [true, true, false]
+        );
+        assert_eq!(g.reclaimable(), 3_000);
+    }
+
     #[test]
     fn auto_select_keeps_exactly_one() {
         let g = group(&[("/x/long/path/a", 30), ("/x/b", 10), ("/x/c", 20)]);
-        assert_eq!(auto_select(&g, &KeepRule::Oldest), [true, false, true]);
-        assert_eq!(auto_select(&g, &KeepRule::Newest), [false, true, true]);
         assert_eq!(
-            auto_select(&g, &KeepRule::ShortestPath),
+            auto_select(&g, &KeepRule::Oldest, ImageKind::Jpeg),
+            [true, false, true]
+        );
+        assert_eq!(
+            auto_select(&g, &KeepRule::Newest, ImageKind::Jpeg),
+            [false, true, true]
+        );
+        assert_eq!(
+            auto_select(&g, &KeepRule::ShortestPath, ImageKind::Jpeg),
             [true, false, true]
         );
         let prio = KeepRule::PriorityFolders(vec![PathBuf::from("/x/long")]);
-        assert_eq!(auto_select(&g, &prio), [false, true, true]);
+        assert_eq!(auto_select(&g, &prio, ImageKind::Jpeg), [false, true, true]);
         for rule in [KeepRule::Oldest, KeepRule::Newest, KeepRule::ShortestPath] {
-            let m = auto_select(&g, &rule);
+            let m = auto_select(&g, &rule, ImageKind::Jpeg);
             assert_eq!(m.iter().filter(|x| !**x).count(), 1);
         }
     }
@@ -833,6 +1505,7 @@ mod tests {
         write(&a, b"same");
         write(&b, b"same");
         let g = DupGroup {
+            kind: GroupKind::Exact,
             size: 4,
             hash: "h".repeat(64),
             files: vec![entry_for(&a).unwrap(), entry_for(&b).unwrap()],

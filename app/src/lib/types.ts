@@ -1,7 +1,24 @@
 // Типы повторяют serde-представление структур ядра (crates/core) и dto.rs.
 
 export type ImageFormat = "Png" | "Jpeg" | "Webp";
-export type VideoMode = "Compat" | "Compact" | { Webm: "Av1" | "Vp9" } | "Mkv";
+export type AudioFormat = "Mp3" | "M4a";
+/** Ручной режим видео (`options::ManualVideo`). */
+export interface ManualVideo {
+  codec: "H264" | "Hevc" | "Av1" | "Vp9";
+  container: "Mp4" | "Mkv" | "Webm";
+  /** CRF/QP: меньше — лучше. `null` — по профилю качества. */
+  crf: number | null;
+  /** Меньшая сторона кадра, только уменьшение. */
+  short_side: number | null;
+  fps: number | null;
+}
+export type VideoMode =
+  | "Compat"
+  | "Compact"
+  | { Webm: "Av1" | "Vp9" }
+  | "Mkv"
+  | { Audio: AudioFormat }
+  | { Manual: ManualVideo };
 export type QualityProfile = "Fast" | "Balanced" | "High";
 export type HwBackend = "Nvenc" | "Qsv" | "Amf" | "Vaapi";
 export type HwPreference = "Auto" | "Off" | { Only: HwBackend };
@@ -52,9 +69,18 @@ export type FfmpegSource = "Auto" | "Bundled" | "System" | { Custom: string };
 export type KindFilter = "All" | "Images" | "Videos" | { Extensions: string[] };
 export type KeepRule = "Oldest" | "Newest" | "ShortestPath" | { PriorityFolders: string[] };
 export type DupAction = "Trash" | "Delete" | { MoveTo: string };
+/** Формат фото в ядре (`media::ImageKind`). */
+export type PhotoKind = "Heif" | "Jpeg" | "Png" | "Webp" | "Bmp" | "Tiff";
+/** `Exact` — копии байт в байт; `Formats` — одно фото в разных форматах (FR-9.2);
+ *  `Similar` — похожие фото, сами не отмечаются (FR-9.1, FR-9.3). */
+export type GroupKind = "Exact" | "Formats" | "Similar";
+/** Насколько похожими должны быть фото (`dupes::Similarity`). */
+export type Similarity = "Off" | "Strict" | "Normal" | "Loose";
 export type Theme = "System" | "Light" | "Dark";
 
 export interface Settings {
+  /** Версия схемы `settings.toml` (миграции — `Settings::migrate` в ядре). */
+  version: number;
   convert: ConvertOptions;
   load: LoadLevel;
   ffmpeg: FfmpegSource;
@@ -69,6 +95,9 @@ export interface Settings {
     include_cloud: boolean;
     keep: KeepRule;
     exclude: string[];
+    find_formats: boolean;
+    keep_format: PhotoKind;
+    similar: Similarity;
   };
   presets: { name: string; convert: ConvertOptions }[];
   scan_recursive: boolean;
@@ -155,6 +184,8 @@ export interface DupesOptions {
   kinds: KindFilter;
   exclude: string[];
   use_cache: boolean;
+  find_formats: boolean;
+  similar: Similarity;
 }
 
 export interface DupFile {
@@ -163,9 +194,15 @@ export interface DupFile {
   mtimeMs: number;
   links: number;
   kind: "image" | "video" | null;
+  /** «HEIC», «JPEG»… — в группах `Formats` и `Similar`. */
+  format: string | null;
+  /** Ширина и высота с учётом поворота — там же. */
+  pixels: [number, number] | null;
 }
 
 export interface DupGroup {
+  kind: GroupKind;
+  /** Размер файла; в группах `Formats` и `Similar` — самого большого. */
   size: number;
   hash: string;
   files: DupFile[];
