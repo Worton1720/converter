@@ -32,6 +32,7 @@ tools/build-linux.sh                          # .deb + AppImage (качает ff
 tools/fetch-ffmpeg.sh linux|windows           # встроенный ffmpeg → app/src-tauri/resources/ffmpeg (зафиксированный выпуск BtbN + sha256)
 tools/release.sh X.Y.Z                        # в dev: версия во всех файлах + коммит; выпуск — после слияния dev → master
 tools/smoke-test.sh target/release/converter   # дымовой тест собранной CLI (ffmpeg в PATH)
+tools/ui-test.sh                              # автотесты интерфейса (app/tests/ui/scenarios.js), ~1 мин, окно невидимо
 ```
 
 Ветки: разработка — в `dev`, `master` получает только слияния из `dev`. Хук `.githooks/pre-commit` (подключается `git config core.hooksPath .githooks`) гоняет fmt, typecheck, clippy и тесты и не пускает коммиты прямо в `master`. Push в `dev` и запросы на слияние проверяет `ci.yml`; слияние в `master` запускает `release.yml`: `ci.yml` целиком → пакеты → `tools/smoke-test.sh` на собранных программах → выпуск `vX.Y.Z`, если такого тега ещё нет (описание — раздел `## [X.Y.Z]` из `CHANGELOG.md`; версии в `Cargo.toml`, `package.json` и `tauri.conf.json` должны совпадать). Новая версия готовится в `dev` через `tools/release.sh X.Y.Z`.
@@ -71,4 +72,5 @@ tools/smoke-test.sh target/release/converter   # дымовой тест соб�
 - У MOV и MP4 одинаковый `format_name` в ffprobe — различает только тег `major_brand`.
 - libheif на Windows не открывает пути вне ANSI: HEIC читается в память и `read_from_bytes`.
 - Windows-код (`cfg(windows)`) локально не компилируется (нет Windows-таргета) — проверяется CI `windows-latest`.
+- Автотесты интерфейса: отладочная сборка с `--dev-test <js>` выполняет сценарий после загрузки страницы (`devtest.rs`), итоги — `dev_report`/`dev_exit`. `tools/ui-test.sh` изолирует XDG-папки (настройки, кэш, журналы, корзина), отключает проверку обновлений и запускает невидимо (xvfb-run в CI, `kwin_wayland --virtual` локально). Сценарий проверяет правила ТЗ 8.5 на каждом экране — новый экран или кнопку покрывать там же. Ждать смены экрана по тексту, а не сразу кликать: иначе кнопка находится на прежнем экране.
 - Отладка GUI без ручных кликов: отладочная сборка при втором запуске `converter-app --dev-eval "<js>"` выполняет JS в окне (single-instance → `WebviewWindow::eval`); в dev есть `window.__store`. `CONVERTER_DEVTOOLS=1` открывает инспектор.

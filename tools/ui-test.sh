@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Автотесты интерфейса: отладочная сборка выполняет app/tests/ui/scenarios.js (`--dev-test`).
+# Настройки, кэш, журналы и корзина — во временной папке: данные пользователя не трогаются.
+# Экран: xvfb-run (CI) или невидимый kwin_wayland --virtual (KDE); иначе окно откроется на экране.
+#
+#   tools/ui-test.sh              # нужны pnpm, ffmpeg, собранный фронтенд-сервер Vite
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$root"
+work="$root/target/ui-test"
+rm -rf "$work"
+mkdir -p "$work"/{config,cache,state,data,files/phone,files/copies}
+
+# Тестовые файлы: фото с телефона (HEIC + PNG) и точная копия для поиска одинаковых.
+cp crates/core/tests/fixtures/sample.heic "$work/files/phone/IMG_A.HEIC"
+ffmpeg -v error -f lavfi -i "gradients=s=480x360:c0=0x0f766e:c1=0xfde68a:seed=7" -frames:v 1 \
+  "$work/files/phone/IMG_B.png"
+cp crates/core/tests/fixtures/sample.heic "$work/files/copies/Отпуск.heic"
+cp crates/core/tests/fixtures/sample.heic "$work/files/copies/Отпуск (копия).heic"
+
+# Без проверки обновлений: тест не должен ходить в сеть.
+mkdir -p "$work/config/converter"
+printf 'check_updates = false\n' >"$work/config/converter/settings.toml"
+
+export XDG_CONFIG_HOME="$work/config" XDG_CACHE_HOME="$work/cache" \
+  XDG_STATE_HOME="$work/state" XDG_DATA_HOME="$work/data" \
+  CONVERTER_TEST_DATA="$work/files"
+
+# Отладочная сборка берёт интерфейс с сервера разработки Vite.
+[[ -d app/node_modules ]] || pnpm --dir app install --frozen-lockfile
+pnpm --dir app exec vite --port 1420 --strictPort >"$work/vite.log" 2>&1 &
+vite=$!
+trap 'kill $vite 2>/dev/null || true' EXIT
+cargo build -q -p converter-app
+for _ in $(seq 1 60); do
+  curl -sf http://localhost:1420 >/dev/null && break
+  sleep 1
+done
+
+app=(target/debug/converter-app --dev-test app/tests/ui/scenarios.js)
+status=0
+if command -v xvfb-run >/dev/null; then
+  xvfb-run -a -s "-screen 0 1600x1000x24" timeout 300 "${app[@]}" | tee "$work/result.log" || status=$?
+elif command -v kwin_wayland >/dev/null; then
+  socket="ui-test-$$"
+  kwin_wayland --virtual --xwayland --width 1600 --height 1000 --socket "$socket" \
+    --exit-with-session "$root/tools/ui-test-app.sh" >"$work/kwin.log" 2>&1 || status=$?
+  cat "$work/result.log" 2>/dev/null || true
+  grep -q "итог: всё прошло" "$work/result.log" 2>/dev/null || status=1
+else
+  echo "нет xvfb-run и kwin_wayland — окно теста откроется на экране"
+  timeout 300 "${app[@]}" | tee "$work/result.log" || status=$?
+fi
+[[ $status -eq 0 ]] && grep -q "итог: всё прошло" "$work/result.log" || {
+  echo "АВТОТЕСТЫ ИНТЕРФЕЙСА НЕ ПРОШЛИ (подробности: $work)" >&2
+  exit 1
+}

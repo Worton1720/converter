@@ -1,5 +1,6 @@
 //! Tauri-оболочка над `converter-core`: команды для интерфейса и события прогресса.
 
+mod devtest;
 mod dto;
 mod update;
 
@@ -676,6 +677,7 @@ fn existing_paths(args: impl IntoIterator<Item = String>) -> Vec<String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let args = devtest::take_args(std::env::args().skip(1).collect());
     let removed = fs_ops::cleanup_stale_temps();
     let settings = Settings::load();
     let governor = Governor::start(settings.load, 0);
@@ -691,7 +693,7 @@ pub fn run() {
         settings: Mutex::new(settings),
         awake: Mutex::new(None),
         allow_close: AtomicBool::new(false),
-        startup_paths: Mutex::new(existing_paths(std::env::args().skip(1))),
+        startup_paths: Mutex::new(existing_paths(args)),
         ffmpeg_dirs: Mutex::new(Vec::new()),
         thumb_gate: (Mutex::new(0), Condvar::new()),
     };
@@ -706,8 +708,12 @@ pub fn run() {
         &format!("запуск Converter {}", env!("CARGO_PKG_VERSION")),
     );
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+    let builder = tauri::Builder::default();
+    // В автотесте — свой экземпляр, даже если программа уже открыта у пользователя.
+    let builder = if devtest::active() {
+        builder
+    } else {
+        builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             // Только для отладки: `converter-app --dev-eval "<js>"` выполняет код в окне,
             // чтобы проверять интерфейс без ручных кликов.
             #[cfg(debug_assertions)]
@@ -726,6 +732,8 @@ pub fn run() {
                 let _ = w.set_focus();
             }
         }))
+    };
+    builder
         // Размер, положение и «развёрнуто» окна между запусками (FR-13.5).
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
@@ -734,6 +742,13 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(state)
         .manage(update::UpdateState::default())
+        .on_page_load(|webview, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Finished
+                && let Some(script) = devtest::script_once()
+            {
+                let _ = webview.eval(&script);
+            }
+        })
         .setup(|app| {
             // Встроенный ffmpeg лежит в ресурсах приложения (AppImage, установщик Windows).
             let state = app.state::<AppState>();
@@ -803,6 +818,8 @@ pub fn run() {
             quit,
             update::check_update,
             update::install_update,
+            devtest::dev_report,
+            devtest::dev_exit,
         ])
         .run(tauri::generate_context!())
         .expect("ошибка запуска приложения");
