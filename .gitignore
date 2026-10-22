@@ -1,0 +1,28 @@
+# Rust
+target/
+
+# Фронтенд и Tauri
+app/node_modules/
+app/dist/
+app/src-tauri/gen/
+
+# Скачивается tools/fetch-ffmpeg.sh и копируется в CI — в репозиторий не кладём
+app/src-tauri/resources/ffmpeg/
+app/src-tauri/resources/windows-dlls/
+tools/ffmpeg/
+
+# Тестовые медиа (интеграционные тесты без них пропускаются) и личные файлы
+data_media/
+image/
+
+# Локальные переменные окружения
+.env
+
+# Значки приложения нужны сборке; глобальное правило macOS «Icon?» их иначе прячет
+!app/src-tauri/icons/
+
+# Редакторы и система
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

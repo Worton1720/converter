@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Проверки перед коммитом — те же, что в CI (.github/workflows/ci.yml).
+# Подключение (один раз после клонирования):  git config core.hooksPath .githooks
+# Пропустить в крайнем случае:                git commit --no-verify
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+step() { printf '\n\033[1m▶ %s\033[0m\n' "$1"; }
+
+step "cargo fmt"
+if ! cargo fmt --all --check >/dev/null; then
+  echo "Код не отформатирован. Выполните: cargo fmt --all" >&2
+  exit 1
+fi
+
+step "Фронтенд: зависимости и проверка типов"
+[[ -d app/node_modules ]] || pnpm --dir app install --frozen-lockfile
+pnpm --dir app typecheck
+
+# generate_context! в converter-app читает app/dist: без сборки фронтенда clippy и тесты не соберутся.
+if [[ ! -f app/dist/index.html ]]; then
+  step "Фронтенд: сборка (нужна для converter-app)"
+  pnpm --dir app build
+fi
+
+step "cargo clippy"
+cargo clippy --all-targets --quiet -- -D warnings
+
+step "cargo test"
+cargo test --quiet
+
+printf '\n\033[1;32m✔ Все проверки пройдены\033[0m\n'

@@ -1,0 +1,39 @@
+name: Что-то не работает
+description: Программа выдала ошибку, зависла или сделала не то, что ожидалось
+labels: [ошибка]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: Что случилось
+      description: Опишите своими словами. Можно приложить снимок экрана — перетащите его сюда.
+      placeholder: "Нажал «Начать», через минуту появилось «Не получилось: 3 файла»…"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Что вы делали перед этим
+      placeholder: |
+        1. Добавил папку с фото с телефона
+        2. Выбрал «Обычные фото (JPEG)»
+        3. Нажал «Начать»
+  - type: input
+    id: version
+    attributes:
+      label: Версия программы
+      description: «Настройки» → «О программе»
+      placeholder: "0.1.0"
+  - type: dropdown
+    id: os
+    attributes:
+      label: Система
+      options: [Windows 11, Windows 10, Ubuntu, Другой Linux]
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Журнал (если знаете, где взять)
+      description: Вкладка «Подробности» → «Открыть полный журнал». Скопируйте последние строки.
+      render: text
