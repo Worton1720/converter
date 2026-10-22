@@ -44,6 +44,9 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Сборочный скрипт libheif-sys запоминает, с чем линковать; сменить ключ при смене фич libheif в vcpkg.
+          key: libheif-de265
       - uses: pnpm/action-setup@v4
         with:
           version: 11
