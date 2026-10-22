@@ -8,6 +8,12 @@ on:
   pull_request:
   workflow_call:
 
+# Новый push в ветку отменяет её прежний прогон: проверять имеет смысл только последнее.
+# В master (вызов из release.yml) ничего не отменяется.
+concurrency:
+  group: ci-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
 env:
   CARGO_TERM_COLOR: always
 
