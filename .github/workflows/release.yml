@@ -90,14 +90,29 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 26
+      - name: Порт libheif в vcpkg
+        id: libheif
+        shell: pwsh
+        # vcpkg на образах GitHub разной свежести: в новых портах libde265 — отдельная фича,
+        # в старых — обязательная зависимость. Фичу hevc (x265, GPL) не берём: HEIC только читаем.
+        run: |
+          $m = Get-Content C:\vcpkg\ports\libheif\vcpkg.json | ConvertFrom-Json
+          $f = if ($m.features.PSObject.Properties.Name -contains 'libde265') { 'core,libde265' } else { 'core' }
+          "spec=libheif[$f]:x64-windows" >> $env:GITHUB_OUTPUT
+          "key=$($m.version)-$($f -replace ',', '-')" >> $env:GITHUB_OUTPUT
       - name: Кэш vcpkg
         uses: actions/cache@v4
         with:
           path: C:\vcpkg\installed
-          key: vcpkg-libheif-de265-${{ runner.os }}-${{ hashFiles('.github/workflows/*.yml') }}
-          restore-keys: vcpkg-libheif-de265-${{ runner.os }}-
+          key: vcpkg-libheif-${{ runner.os }}-${{ steps.libheif.outputs.key }}
       - name: libheif через vcpkg
-        run: vcpkg install "libheif[core,libde265]:x64-windows"
+        shell: pwsh
+        run: |
+          vcpkg install "${{ steps.libheif.outputs.spec }}"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $bin = "C:\vcpkg\installed\x64-windows\bin"
+          if (Test-Path "$bin\libx265.dll") { throw "libx265.dll (GPL) не должна попадать в поставку" }
+          if (-not (Test-Path "$bin\libde265.dll")) { throw "нет libde265.dll — HEIC не будет открываться" }
       - name: DLL рядом с программой
         shell: pwsh
         run: |

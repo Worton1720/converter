@@ -4,7 +4,7 @@
 
 - Rust 1.88+, Node.js 22+ и pnpm 11;
 - ffmpeg и ffprobe 6.1+ в `PATH` (или в `tools/ffmpeg/`);
-- libheif: на Linux — пакет (`libheif-dev`, `libheif`), на Windows — `vcpkg install "libheif[core,libde265]:x64-windows"` (без x265: он под GPL, а HEIC нужно только читать);
+- libheif: на Linux — пакет (`libheif-dev`, `libheif`), на Windows — `vcpkg install "libheif[core,libde265]:x64-windows"` (без x265: он под GPL, а HEIC нужно только читать; в старых vcpkg, где libde265 не фича, — `libheif[core]`);
 - для интерфейса на Linux — WebKitGTK 4.1 (`libwebkit2gtk-4.1-dev`);
 - для выпускных сборок Linux — ещё cmake и libde265 (libheif собирается из исходников и вшивается в программу).
 
