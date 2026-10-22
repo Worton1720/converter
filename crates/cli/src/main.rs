@@ -306,7 +306,7 @@ struct DupesArgs {
     #[arg(long)]
     no_formats: bool,
     /// Похожие фото (серии, пересжатые копии): только показываются, сами не убираются
-    #[arg(long, value_enum, default_value = "off")]
+    #[arg(long, value_enum, default_value = "normal")]
     similar: SimilarArg,
     #[arg(long, value_enum, default_value = "report")]
     action: ActionArg,

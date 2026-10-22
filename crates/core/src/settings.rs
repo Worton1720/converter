@@ -34,7 +34,7 @@ pub struct DupesSettings {
     pub find_formats: bool,
     /// Какой формат оставлять у одного фото в разных форматах; по умолчанию JPEG.
     pub keep_format: ImageKind,
-    /// Искать похожие фото (FR-9.1); по умолчанию нет — это долго.
+    /// Искать похожие фото (FR-9.1); по умолчанию — «Похожие». Сами они не отмечаются.
     pub similar: Similarity,
 }
 
@@ -49,7 +49,7 @@ impl Default for DupesSettings {
             exclude: Vec::new(),
             find_formats: true,
             keep_format: ImageKind::Jpeg,
-            similar: Similarity::Off,
+            similar: Similarity::Normal,
         }
     }
 }

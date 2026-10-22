@@ -124,7 +124,7 @@ async function findDuplicates() {
       exclude: ds.exclude ?? [],
       use_cache: true,
       find_formats: ds.find_formats ?? true,
-      similar: ds.similar ?? "Off",
+      similar: ds.similar ?? "Normal",
     });
     useStore.getState().setDupes((d) => ({
       ...d,
@@ -411,7 +411,7 @@ function Simple({ onReview }: { onReview: (kind?: GroupKind) => void }) {
             ruleKey(ds.keep) !== "Oldest" && "что оставлять",
             ds.find_formats === false && "без поиска одного фото в разных форматах",
             keepFormat !== "Jpeg" && "какой формат оставлять",
-            (ds.similar ?? "Off") !== "Off" && "похожие фото",
+            (ds.similar ?? "Normal") !== "Normal" && "похожие фото",
             kindKey(ds.kinds) !== "All" && "какие файлы",
             ds.min_size !== 1024 && "минимальный размер",
             (ds.exclude ?? []).length > 0 && "исключения",
@@ -439,7 +439,7 @@ function Simple({ onReview }: { onReview: (kind?: GroupKind) => void }) {
               hint="Серии снимков, уменьшенные и пересохранённые копии. Программа их сама не отмечает. Фото с телефона проверяются быстро, остальные — дольше."
             >
               <Select<Similarity>
-                value={ds.similar ?? "Off"}
+                value={ds.similar ?? "Normal"}
                 onChange={(v) => updateSettings((s) => ({ ...s, dupes: { ...s.dupes, similar: v } }))}
                 options={SIMILARITY}
               />
