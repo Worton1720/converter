@@ -4,9 +4,11 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { useEffect, useState } from "react";
 import { Header } from "./components/Header";
 import { SettingsDialog } from "./components/SettingsDialog";
+import { UpdateBanner } from "./components/UpdateBanner";
 import { Button, Dialog } from "./components/ui";
 import { api } from "./lib/api";
 import { useStore } from "./lib/store";
+import { checkForUpdate } from "./lib/update";
 import type { EngineEvent, GovernorStatus, Item } from "./lib/types";
 import { addPaths, ConvertView } from "./views/convert/ConvertView";
 import { DupesView } from "./views/dupes/DupesView";
@@ -62,6 +64,8 @@ function useBackendEvents() {
         if (existing.length) s.addItems(existing);
         if (info.ffmpeg_error) s.addLog("Error", info.ffmpeg_error);
         if (info.startup_paths.length) void addPaths(info.startup_paths);
+        // Не сразу: запуск и первый список файлов важнее.
+        if (info.settings.check_updates ?? true) setTimeout(() => void checkForUpdate(false), 5000);
       })
       .catch((e) => s.addLog("Error", `Не удалось запустить ядро: ${e}`));
     return () => subs.forEach((p) => void p.then((un) => un()));
@@ -94,6 +98,7 @@ export default function App() {
     <TooltipPrimitive.Provider>
       <div className="flex h-full flex-col">
         <Header onSettings={() => setSettingsOpen(true)} />
+        <UpdateBanner />
         <main className="flex min-h-0 flex-1">
           {!ready ? null : tab === "convert" ? <ConvertView /> : tab === "dupes" ? <DupesView /> : <LogView />}
         </main>

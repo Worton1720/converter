@@ -58,6 +58,8 @@ tools/smoke-test.sh target/release/converter   # дымовой тест соб�
 
 **`app/src-tauri`** — состояние `AppState` (список `MediaItem`, активный запуск, отчёт дубликатов, настройки), команды `#[tauri::command]` в `lib.rs`, DTO для фронтенда в `dto.rs`. События ядра пересылаются пачками раз в 100 мс (`convert:events`), статус регулятора — `governor`. Миниатюры — свой протокол `thumb://` (`thumb.rs` в ядре, кэш на диске).
 
+Автообновление — `update.rs` (команды `check_update`, `install_update`, событие `update:progress`; переносная версия без типа пакета не обновляется сама) + `lib/update.ts` и `components/UpdateBanner.tsx`. Источник — `releases/latest/download/latest.json`, который собирает release.yml из `*.sig`; ключи платформ `linux-x86_64-appimage|deb`, `windows-x86_64-nsis` и запасные без типа. Подпись включает версию: проверять установку можно только обновлением с меньшей версии на большую (см. docs/LESSONS.md).
+
 **`app/src`** — React 19 + Tailwind 4 + zustand. `lib/types.ts` повторяет serde-представление структур ядра (внешне тегированные enum: `"Auto"`, `{ Only: "Vaapi" }`, `{ Webm: "Av1" }`) — при изменении Rust-типов править и его. `lib/store.ts` — единое состояние, разбор пачек событий (`applyEvents`), отложенное сохранение настроек. Базовые настройки на виду, редкие — в `components/Advanced.tsx`.
 
 ## Неочевидное

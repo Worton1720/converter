@@ -50,6 +50,18 @@
     "license": "MIT",
     "category": "Photography",
     "shortDescription": "Конвертация фото и видео с телефона и поиск одинаковых файлов",
-    "longDescription": "Converter переводит фото HEIC и видео с iPhone в форматы, которые открываются везде, и находит одинаковые файлы, чтобы освободить место. Простой интерфейс в три шага."
+    "longDescription": "Converter переводит фото HEIC и видео с iPhone в форматы, которые открываются везде, и находит одинаковые файлы, чтобы освободить место. Простой интерфейс в три шага.",
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY4MDgxQjU4RUFCRjhFQ0MKUldUTWpyL3FXQnNJK0NLSDMvZ0RHQldMbUYzcTMrZUJreXhITmxJU0MyQ2hkNWVLd0JlK2ZXWmMK",
+      "endpoints": [
+        "https://github.com/Worton1720/converter/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }
