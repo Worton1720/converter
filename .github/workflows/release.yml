@@ -1,24 +1,35 @@
 name: Release
 
-# Выпуск: tools/release.sh X.Y.Z (поднимает версии, коммит и тег vX.Y.Z) → git push --follow-tags.
-# По тегу собираются пакеты для Linux и Windows и публикуется выпуск на GitHub с описанием
-# из CHANGELOG.md. Ручной запуск (workflow_dispatch) только собирает пакеты — без выпуска.
+# Разработка идёт в dev; слияние dev → master запускает полный процесс:
+#   1. все проверки ci.yml на Linux и Windows (fmt, clippy, тесты);
+#   2. сборка пакетов и дымовой тест готовых программ (tools/smoke-test.sh);
+#   3. выпуск vX.Y.Z на GitHub — если версии из Cargo.toml ещё нет среди тегов.
+# Новая версия готовится в dev командой tools/release.sh X.Y.Z. Без неё слияние только
+# проверяет и собирает пакеты (они остаются в артефактах прогона). Ручной запуск — тоже без выпуска.
 on:
   push:
-    tags: ["v*"]
+    branches: [master]
   workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  tests:
+    uses: ./.github/workflows/ci.yml
+
   check:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.v.outputs.version }}
+      publish: ${{ steps.v.outputs.publish }}
     steps:
       - uses: actions/checkout@v5
-      - name: Версия в теге и в файлах проекта совпадает
+      - name: Версия и нужен ли выпуск
         id: v
         run: |
           version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
@@ -26,14 +37,20 @@ jobs:
             v=$(jq -r .version "$f")
             [[ "$v" == "$version" ]] || { echo "::error file=$f::версия $v, а в Cargo.toml $version"; exit 1; }
           done
-          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$version" ]]; then
-            echo "::error::тег $GITHUB_REF_NAME не совпадает с версией проекта $version"; exit 1
+          publish=false
+          if [[ "$GITHUB_EVENT_NAME" != push ]]; then
+            echo "::notice::ручной запуск — только сборка, без выпуска"
+          elif git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
+            echo "::notice::версия $version уже выпущена — только проверки и сборка. Для выпуска: tools/release.sh в dev"
+          else
+            grep -q "^## \[$version\]" CHANGELOG.md || { echo "::error file=CHANGELOG.md::нет раздела [$version]"; exit 1; }
+            publish=true
           fi
-          grep -q "^## \[$version\]" CHANGELOG.md || { echo "::error file=CHANGELOG.md::нет раздела [$version]"; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
 
   linux:
-    needs: check
+    needs: [tests, check]
     # 22.04 — чтобы AppImage запускался на старых системах (glibc 2.35). libheif вшивается
     # в программу (embedded-libheif), поэтому системная libheif 1.12 не мешает.
     # .deb требует ffmpeg ≥ 6.1 из системы — ставится на Ubuntu 24.04 и новее.
@@ -64,13 +81,20 @@ jobs:
           cp target/release/bundle/deb/*.deb "dist/Converter-$VERSION-linux-amd64.deb"
           cp target/release/bundle/appimage/*.AppImage "dist/Converter-$VERSION-linux-x86_64.AppImage"
           tar -C target/release -czf "dist/converter-cli-$VERSION-linux-x86_64.tar.gz" converter
+      - name: Дымовой тест
+        run: PATH="$PWD/app/src-tauri/resources/ffmpeg:$PATH" tools/smoke-test.sh target/release/converter
+      - name: Состав пакетов
+        run: |
+          dpkg-deb -c dist/*.deb | grep -q 'usr/bin/converter-app$' || { echo "::error::в .deb нет программы"; exit 1; }
+          cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE"/dist/*.AppImage --appimage-extract >/dev/null
+          squashfs-root/usr/lib/Converter/ffmpeg/ffmpeg -version | head -1
       - uses: actions/upload-artifact@v4
         with:
           name: linux
           path: dist/*
 
   windows:
-    needs: check
+    needs: [tests, check]
     runs-on: windows-latest
     env:
       VERSION: ${{ needs.check.outputs.version }}
@@ -145,13 +169,19 @@ jobs:
           Copy-Item target/release/converter.exe $cli/
           Copy-Item app/src-tauri/resources/windows-dlls/*.dll $cli/
           Compress-Archive -Path "$cli/*" -DestinationPath "dist/converter-cli-$env:VERSION-windows-x64.zip"
+      - name: Распаковать CLI для проверки
+        shell: pwsh
+        run: Expand-Archive "dist/converter-cli-$env:VERSION-windows-x64.zip" "$env:RUNNER_TEMP/smoke-cli"
+      - name: Дымовой тест (программа из архива — проверяет и DLL рядом с ней)
+        shell: bash
+        run: PATH="$PWD/app/src-tauri/resources/ffmpeg:$PATH" tools/smoke-test.sh "$RUNNER_TEMP/smoke-cli/converter.exe"
       - uses: actions/upload-artifact@v4
         with:
           name: windows
           path: dist/*
 
   release:
-    if: github.ref_type == 'tag'
+    if: needs.check.outputs.publish == 'true'
     needs: [check, linux, windows]
     runs-on: ubuntu-24.04
     permissions:
@@ -179,4 +209,5 @@ jobs:
         run: |
           flags=()
           [[ "$VERSION" == *-* ]] && flags+=(--prerelease)
-          gh release create "$GITHUB_REF_NAME" dist/* --title "Converter $VERSION" --notes-file notes.md --verify-tag "${flags[@]}"
+          # Тег vX.Y.Z ставится на проверенный коммит master.
+          gh release create "v$VERSION" dist/* --target "$GITHUB_SHA" --title "Converter $VERSION" --notes-file notes.md "${flags[@]}"

@@ -30,10 +30,11 @@ pnpm tauri build --no-bundle                  # релизный бинарни�
 
 tools/build-linux.sh                          # .deb + AppImage (качает ffmpeg, собирает с embedded-libheif)
 tools/fetch-ffmpeg.sh linux|windows           # встроенный ffmpeg → app/src-tauri/resources/ffmpeg (зафиксированный выпуск BtbN + sha256)
-tools/release.sh X.Y.Z                        # версия во всех файлах + коммит + тег; публикует CI после git push --follow-tags
+tools/release.sh X.Y.Z                        # в dev: версия во всех файлах + коммит; выпуск — после слияния dev → master
+tools/smoke-test.sh target/release/converter   # дымовой тест собранной CLI (ffmpeg в PATH)
 ```
 
-Хук `.githooks/pre-commit` (подключается `git config core.hooksPath .githooks`) гоняет fmt, typecheck, clippy и тесты — коммит не пройдёт, пока они красные. Выпуск (`.github/workflows/release.yml`) берёт описание из раздела `## [X.Y.Z]` в `CHANGELOG.md` и падает, если версия в теге, `Cargo.toml`, `package.json` и `tauri.conf.json` расходится.
+Ветки: разработка — в `dev`, `master` получает только слияния из `dev`. Хук `.githooks/pre-commit` (подключается `git config core.hooksPath .githooks`) гоняет fmt, typecheck, clippy и тесты и не пускает коммиты прямо в `master`. Push в `dev` и запросы на слияние проверяет `ci.yml`; слияние в `master` запускает `release.yml`: `ci.yml` целиком → пакеты → `tools/smoke-test.sh` на собранных программах → выпуск `vX.Y.Z`, если такого тега ещё нет (описание — раздел `## [X.Y.Z]` из `CHANGELOG.md`; версии в `Cargo.toml`, `package.json` и `tauri.conf.json` должны совпадать). Новая версия готовится в `dev` через `tools/release.sh X.Y.Z`.
 
 Пакеты: `.deb` — базовый `tauri.conf.json` (системный ffmpeg по зависимости); AppImage — плюс `--config src-tauri/tauri.appimage.conf.json` (ресурс `ffmpeg/`); Windows — `tauri.windows.conf.json` подмешивается автоматически (ffmpeg и DLL libheif из vcpkg рядом с exe). Выпускные Linux-сборки идут с фичей `embedded-libheif` (libheif 1.23 статически, libde265 встроенный декодер, без плагинов): так AppImage не зависит от плагинов libheif системы, а сборка на Ubuntu 22.04 возможна. Встроенный ffmpeg ищется в `resource_dir/ffmpeg` (`Tools::locate_with`, передаётся из `setup`). Значки — только `icons/icon.ico` (Windows) и `icons/icon.png` 512 px (Linux: Tauri там берёт лишь PNG); собираются `tools/icon/make-icon.sh` из `tools/icon/icon.svg` и упрощённого `icon-small.svg` для 16–24 px. `tauri icon` не использовать — он снова разложит десяток файлов.
 

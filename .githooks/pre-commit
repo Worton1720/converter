@@ -7,6 +7,13 @@ cd "$(git rev-parse --show-toplevel)"
 
 step() { printf '\n\033[1m▶ %s\033[0m\n' "$1"; }
 
+# master получает изменения только слиянием из dev — каждое слияние проверяется и может стать выпуском.
+if [[ "$(git branch --show-current)" == master && -z "${ALLOW_MASTER:-}" ]]; then
+  echo "Коммит прямо в master: разработка идёт в ветке dev (git switch dev)." >&2
+  echo "Если это действительно нужно: ALLOW_MASTER=1 git commit …" >&2
+  exit 1
+fi
+
 step "cargo fmt"
 if ! cargo fmt --all --check >/dev/null; then
   echo "Код не отформатирован. Выполните: cargo fmt --all" >&2

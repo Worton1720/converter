@@ -49,7 +49,7 @@
 - [x] AppImage со встроенным ffmpeg и libheif (`embedded-libheif`), 238 МБ; проверен запуск — ffmpeg берётся из образа, HEIC читается.
 - [x] `.deb` с зависимостями `ffmpeg (>= 6.1)`, `libde265-0`, 6 МБ.
 - [x] Окно «О программе» с лицензиями ffmpeg, libheif, libde265, шрифта и ссылками на исходники (раздел 8.4).
-- [x] Workflow выпуска `.github/workflows/release.yml`: Linux (22.04) и Windows (NSIS + portable-zip) по тегу `v*`.
+- [x] Workflow выпуска `.github/workflows/release.yml`: Linux (22.04) и Windows (NSIS + portable-zip) по тегу `v*`. С 2026-10-22 — по слиянию dev → master: полные проверки, пакеты, дымовой тест, выпуск новой версии.
 - [ ] Windows: workflow ни разу не запускался — проверить сборку, что DLL libheif и ffmpeg ложатся рядом с exe (`"./"` в `tauri.windows.conf.json`), установку WebView2.
 - [ ] `.deb` на Ubuntu 22.04 не ставится: там ffmpeg 4.4 < 6.1. Либо отдельный пакет со встроенным ffmpeg, либо только AppImage для 22.04.
 - [ ] AVIF во выпускных Linux-сборках не читается: встроенная libheif собирается без dav1d (иначе зависимость `libdav1d` с разным именем пакета в 22.04 и 24.04).
