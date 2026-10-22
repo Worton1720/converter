@@ -17,7 +17,7 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Версия в теге и в файлах проекта совпадает
         id: v
         run: |
@@ -41,7 +41,7 @@ jobs:
     env:
       VERSION: ${{ needs.check.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Системные зависимости
         run: >
           sudo apt-get update && sudo apt-get install -y pkg-config cmake libde265-dev
@@ -51,7 +51,7 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: 11
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 26
       - name: Сборка .deb и AppImage
@@ -78,15 +78,21 @@ jobs:
       VCPKGRS_DYNAMIC: 1
       VCPKG_ROOT: C:\vcpkg
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: pnpm/action-setup@v4
         with:
           version: 11
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 26
+      - name: Кэш vcpkg
+        uses: actions/cache@v4
+        with:
+          path: C:\vcpkg\installed
+          key: vcpkg-libheif-${{ runner.os }}-${{ hashFiles('.github/workflows/*.yml') }}
+          restore-keys: vcpkg-libheif-${{ runner.os }}-
       - name: libheif через vcpkg
         run: vcpkg install libheif:x64-windows
       - name: DLL рядом с программой
@@ -136,7 +142,7 @@ jobs:
       VERSION: ${{ needs.check.outputs.version }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
         with:
           path: dist

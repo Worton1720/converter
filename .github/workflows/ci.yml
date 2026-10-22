@@ -11,7 +11,7 @@ jobs:
   linux:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Системные зависимости
         run: >
           sudo apt-get update && sudo apt-get install -y pkg-config libheif-dev liblcms2-dev ffmpeg
@@ -23,7 +23,7 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: 11
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 26
       - name: Фронтенд (проверка типов и сборка — нужна для generate_context!)
@@ -39,7 +39,7 @@ jobs:
       VCPKGRS_DYNAMIC: 1
       VCPKG_ROOT: C:\vcpkg
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -47,12 +47,24 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: 11
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 26
       - run: pnpm --dir app install --frozen-lockfile && pnpm --dir app build
+      - name: Кэш vcpkg
+        uses: actions/cache@v4
+        with:
+          path: C:\vcpkg\installed
+          key: vcpkg-libheif-${{ runner.os }}-${{ hashFiles('.github/workflows/*.yml') }}
+          restore-keys: vcpkg-libheif-${{ runner.os }}-
       - name: libheif через vcpkg
         run: vcpkg install libheif:x64-windows
+      - name: Ресурсы из tauri.windows.conf.json (DLL libheif; ffmpeg для проверок не нужен — заглушка)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force app/src-tauri/resources/windows-dlls, app/src-tauri/resources/ffmpeg | Out-Null
+          Copy-Item C:\vcpkg\installed\x64-windows\bin\*.dll app/src-tauri/resources/windows-dlls/
+          Set-Content app/src-tauri/resources/ffmpeg/README.txt "CI: встроенный ffmpeg нужен только выпуску"
       - run: cargo clippy --all-targets -- -D warnings
       - name: Тесты (интеграционные пропускаются без ffmpeg и образцов)
         run: |
