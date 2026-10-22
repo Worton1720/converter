@@ -1,8 +1,12 @@
 name: CI
 
+# Проверки на каждый push в dev (и любые ветки, кроме master) и на запросы на слияние.
+# В master этот же набор вызывает release.yml — перед сборкой и выпуском.
 on:
   push:
+    branches-ignore: [master]
   pull_request:
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always

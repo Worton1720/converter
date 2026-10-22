@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Подготовка выпуска: поднимает версию во всех файлах проекта, проверяет CHANGELOG.md,
-# делает коммит «Выпуск X.Y.Z» и тег vX.Y.Z. Публикует GitHub Actions после
-#   git push --follow-tags
+# Подготовка выпуска в ветке dev: поднимает версию во всех файлах проекта, проверяет
+# CHANGELOG.md и делает коммит «Выпуск X.Y.Z». Сам выпуск (тег vX.Y.Z, пакеты, страница
+# на GitHub) создаёт GitHub Actions после слияния dev → master — см. .github/workflows/release.yml.
 #
 #   tools/release.sh 0.2.0
 set -euo pipefail
@@ -11,8 +11,10 @@ version="${1:?укажите версию, например 0.2.0}"
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
+[[ "$(git branch --show-current)" == dev ]] || { echo "выпуск готовится в ветке dev: git switch dev" >&2; exit 1; }
 [[ -z "$(git status --porcelain)" ]] || { echo "есть незакоммиченные изменения — сначала закоммитьте их" >&2; exit 1; }
-git rev-parse -q --verify "refs/tags/v$version" >/dev/null && { echo "тег v$version уже есть" >&2; exit 1; }
+git fetch -q --tags origin || true
+git rev-parse -q --verify "refs/tags/v$version" >/dev/null && { echo "версия $version уже выпущена" >&2; exit 1; }
 grep -q "^## \[$version\]" CHANGELOG.md || {
   echo "в CHANGELOG.md нет раздела «## [$version] — ГГГГ-ММ-ДД»: опишите изменения и запустите снова" >&2
   exit 1
@@ -26,7 +28,10 @@ done
 cargo update --workspace --quiet
 
 git add Cargo.toml Cargo.lock app/package.json app/src-tauri/tauri.conf.json
-# Первый выпуск идёт с версией, уже записанной в файлах, — тогда коммитить нечего.
 git diff --cached --quiet || git commit -m "Выпуск $version"
-git tag -a "v$version" -m "Converter $version"
-echo "готово: тег v$version. Опубликовать: git push --follow-tags"
+cat <<MSG
+готово: версия $version в dev. Дальше:
+  git push
+  gh pr create --base master --head dev --fill    # или «Compare & pull request» на GitHub
+После зелёных проверок — слить запрос; выпуск v$version появится сам.
+MSG
