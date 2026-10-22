@@ -96,11 +96,10 @@
     await until(() => store().order.length === 2, "файлы в списке");
     checkElderlyRules("список файлов");
     await click("Начать");
-    await until(
-      () => store().order.every((p) => store().rows[p].job.status === "done"),
-      "все файлы готовы",
-      90000,
-    );
+    const rows = () => store().order.map((p) => store().rows[p]);
+    await until(() => rows().every((r) => !["waiting", "running"].includes(r.job.status)), "конец работы", 90000);
+    const bad = rows().filter((r) => r.job.status !== "done");
+    expect(!bad.length, `не готово: ${bad.map((r) => `${r.item.name}: ${r.job.status} ${r.job.message ?? ""}`).join("; ")}`);
     await until(() => button("Открыть папку с результатом"), "итог с кнопкой «Открыть папку с результатом»");
     checkElderlyRules("итог преобразования");
   });
