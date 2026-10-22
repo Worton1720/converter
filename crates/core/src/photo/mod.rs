@@ -155,6 +155,7 @@ pub fn convert(
         ImageFormat::Jpeg => {
             img.pixels =
                 std::mem::replace(&mut img.pixels, Pixels::Rgb8(Vec::new())).flatten_alpha();
+            add_exif_thumbnail(&mut img);
             encode::jpeg(&img, dest, opts.quality)?
         }
         ImageFormat::Webp => {
@@ -187,6 +188,47 @@ fn prepare_metadata(img: &mut Decoded, policy: MetadataPolicy) {
     if policy == MetadataPolicy::StripGps {
         // В XMP тоже бывают координаты (exif:GPSLatitude); править XML на месте ненадёжно.
         img.xmp = None;
+    }
+}
+
+/// Сторона EXIF-миниатюры: как у камер и телефонов.
+const EXIF_THUMB_SIDE: u32 = 160;
+
+/// EXIF-миниатюра в JPEG по уже повёрнутой картинке: по ней поиск похожих фото потом не
+/// декодирует снимок целиком (FR-9.1). Только если EXIF есть: при «удалить все метаданные»
+/// миниатюра не добавляется; если блок с ней не влезет в APP1, остаётся без неё.
+fn add_exif_thumbnail(img: &mut Decoded) {
+    let (Some(tiff), Pixels::Rgb8(data)) = (img.exif.as_ref(), &img.pixels) else {
+        return;
+    };
+    let Some(view) = ::image::ImageBuffer::<::image::Rgb<u8>, &[u8]>::from_raw(
+        img.width,
+        img.height,
+        data.as_slice(),
+    ) else {
+        return;
+    };
+    let scale = f64::from(EXIF_THUMB_SIDE) / f64::from(img.width.max(img.height));
+    let (w, h) = if scale >= 1.0 {
+        return; // картинка и так маленькая — миниатюра не нужна
+    } else {
+        (
+            ((f64::from(img.width) * scale).round() as u32).max(1),
+            ((f64::from(img.height) * scale).round() as u32).max(1),
+        )
+    };
+    let thumb = ::image::imageops::thumbnail(&view, w, h);
+    let mut jpeg = Vec::new();
+    if ::image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 75)
+        .encode_image(&thumb)
+        .is_err()
+    {
+        return;
+    }
+    if let Some(with) = exif::with_thumbnail(tiff, &jpeg)
+        && with.len() + 6 <= encode::JPEG_APP1_MAX
+    {
+        img.exif = Some(with);
     }
 }
 
