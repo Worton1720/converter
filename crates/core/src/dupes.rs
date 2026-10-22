@@ -1076,6 +1076,8 @@ pub enum DupAction {
 pub struct ActionResult {
     pub path: PathBuf,
     pub error: Option<String>,
+    /// Куда перемещён (для `MoveTo`) — чтобы потом вернуть на место.
+    pub moved_to: Option<PathBuf>,
 }
 
 fn unchanged(e: &FileEntry) -> bool {
@@ -1112,14 +1114,22 @@ pub fn apply(
             };
             let names = std::iter::once(&file.path).chain(&file.links);
             for path in names {
+                let mut moved_to = None;
                 let error = error.clone().or_else(|| match action {
                     DupAction::Trash => crate::fs_ops::trash(path).err().map(|e| e.to_string()),
                     DupAction::Delete => std::fs::remove_file(path).err().map(|e| e.to_string()),
-                    DupAction::MoveTo(dir) => move_into(path, dir).err().map(|e| e.to_string()),
+                    DupAction::MoveTo(dir) => match move_into(path, dir) {
+                        Ok(target) => {
+                            moved_to = Some(target);
+                            None
+                        }
+                        Err(e) => Some(e.to_string()),
+                    },
                 });
                 results.push(ActionResult {
                     path: path.clone(),
                     error,
+                    moved_to,
                 });
             }
         }

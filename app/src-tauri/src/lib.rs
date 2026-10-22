@@ -12,10 +12,11 @@ use std::time::{Duration, Instant};
 
 use converter_core::dupes::{self, DupAction, DupesOptions, DupesReport, KeepRule};
 use converter_core::engine::{self, Engine, RunHandle, SpaceCheck};
-use converter_core::events::Event;
+use converter_core::events::{Event, JobOutcome};
 use converter_core::ffmpeg::Tools;
 use converter_core::fs_ops;
 use converter_core::governor::{Governor, LoadLevel};
+use converter_core::history::{self, Change, Fate, History};
 use converter_core::hw::{self, HwCaps};
 use converter_core::logfile::LogFile;
 use converter_core::media::{self, ImageKind};
@@ -43,6 +44,19 @@ struct ActiveRun {
     ids: Vec<PathBuf>,
 }
 
+impl AppState {
+    /// Изменить запись истории и сохранить файл (не чаще, чем просит вызывающий).
+    fn with_history(&self, id: u64, save: bool, f: impl FnOnce(&mut history::Entry)) {
+        let mut h = self.history.lock().unwrap();
+        if let Some(e) = h.get_mut(id) {
+            f(e);
+        }
+        if save {
+            h.save();
+        }
+    }
+}
+
 #[derive(Default)]
 struct DupesState {
     report: Option<DupesReport>,
@@ -58,6 +72,8 @@ struct AppState {
     run: Mutex<Option<ActiveRun>>,
     dupes: Mutex<DupesState>,
     settings: Mutex<Settings>,
+    /// История действий — для «Истории», «Вернуть как было» и продолжения после сбоя.
+    history: Mutex<History>,
     awake: Mutex<Option<keepawake::KeepAwake>>,
     allow_close: AtomicBool,
     startup_paths: Mutex<Vec<String>>,
@@ -365,26 +381,79 @@ fn start_convert(
         settings.convert = options.clone();
         let _ = settings.save();
     }
+    let entry = history::Entry::convert(
+        options.clone(),
+        items.iter().map(|i| i.path.clone()).collect(),
+    );
+    let history_id = entry.id;
+    {
+        let mut h = state.history.lock().unwrap();
+        h.push(entry);
+        h.save();
+    }
     let handle = engine.convert(items, options);
     let events = handle.events.clone();
     *run = Some(ActiveRun { handle, ids });
     drop(run);
     state.update_awake();
-    std::thread::spawn(move || forward_events(app, events));
+    std::thread::spawn(move || forward_events(app, events, history_id));
     Ok(())
 }
 
 /// Пачки событий раз в 100 мс: интерфейс не захлёбывается на тысячах файлов.
-fn forward_events(app: AppHandle, events: crossbeam_channel::Receiver<Event>) {
-    let log = &app.state::<AppState>().log;
+/// История: результат файла. Сохраняется не чаще раза в 2 с — при сбое теряется не больше.
+fn record_finished(
+    state: &AppState,
+    history_id: u64,
+    source: &Path,
+    outcome: &JobOutcome,
+    save: bool,
+) {
+    state.with_history(history_id, save, |e| match outcome {
+        JobOutcome::Done {
+            output,
+            source: action,
+            ..
+        } => e.file_done(
+            source,
+            Some(Change {
+                source: source.to_path_buf(),
+                output: Some(output.clone()),
+                fate: Fate::from(action),
+            }),
+            false,
+            false,
+        ),
+        JobOutcome::Skipped { .. } => e.file_done(source, None, true, false),
+        JobOutcome::Failed { .. } => e.file_done(source, None, false, true),
+        // Отменённые остаются в списке «не сделано».
+        JobOutcome::Cancelled => {}
+    });
+}
+
+fn forward_events(app: AppHandle, events: crossbeam_channel::Receiver<Event>, history_id: u64) {
+    let state = app.state::<AppState>();
+    let log = &state.log;
     let mut batch: Vec<Event> = Vec::new();
     let mut last = Instant::now();
+    let mut last_save = Instant::now();
     let mut summary = None;
     loop {
         match events.recv_timeout(Duration::from_millis(100)) {
             Ok(e) => {
                 log.event(&e);
+                if let Event::JobFinished {
+                    source, outcome, ..
+                } = &e
+                {
+                    let save = last_save.elapsed() >= Duration::from_secs(2);
+                    if save {
+                        last_save = Instant::now();
+                    }
+                    record_finished(&state, history_id, source, outcome, save);
+                }
                 if let Event::RunFinished(s) = &e {
+                    state.with_history(history_id, true, history::Entry::finish);
                     summary = Some(s.clone());
                 }
                 batch.push(e);
@@ -404,7 +473,6 @@ fn forward_events(app: AppHandle, events: crossbeam_channel::Receiver<Event>) {
     if !batch.is_empty() {
         let _ = app.emit("convert:events", batch);
     }
-    let state = app.state::<AppState>();
     if let Some(run) = state.run.lock().unwrap().take() {
         run.handle.join();
     }
@@ -550,6 +618,7 @@ async fn dupes_apply(
         let mut d = state.dupes.lock().unwrap();
         let report = d.report.as_mut().ok_or("сначала найдите дубликаты")?;
         let results = dupes::apply(&report.groups, &marks, &action).map_err(err)?;
+        record_dupes(&state, &report.groups, &results, &action);
         // Убираем из отчёта обработанные файлы и группы, где остался один файл.
         let done: HashSet<&Path> = results
             .iter()
@@ -564,6 +633,54 @@ async fn dupes_apply(
     })
     .await
     .map_err(err)?
+}
+
+/// История: что стало с убранными копиями (в корзину, удалены, куда перемещены).
+fn record_dupes(
+    state: &AppState,
+    groups: &[dupes::DupGroup],
+    results: &[dupes::ActionResult],
+    action: &DupAction,
+) {
+    let ok: Vec<&dupes::ActionResult> = results.iter().filter(|r| r.error.is_none()).collect();
+    if ok.is_empty() {
+        return;
+    }
+    let done: HashSet<&Path> = ok.iter().map(|r| r.path.as_path()).collect();
+    let freed = groups
+        .iter()
+        .flat_map(|g| &g.files)
+        .filter(|f| done.contains(f.path.as_path()))
+        .map(|f| f.size)
+        .sum();
+    let changes = ok
+        .iter()
+        .map(|r| Change {
+            source: r.path.clone(),
+            output: None,
+            fate: match action {
+                DupAction::Trash => Fate::Trashed,
+                DupAction::Delete => Fate::Deleted,
+                DupAction::MoveTo(_) => Fate::MovedTo(r.moved_to.clone().unwrap_or_default()),
+            },
+        })
+        .collect();
+    let now = history::now_ms();
+    let mut h = state.history.lock().unwrap();
+    h.push(history::Entry {
+        id: now,
+        finished_ms: Some(now),
+        action: history::Action::Dupes { freed },
+        changes,
+        undone: false,
+    });
+    h.save();
+}
+
+#[tauri::command]
+fn history_list(state: State<'_, AppState>) -> Vec<dto::HistoryItem> {
+    let h = state.history.lock().unwrap();
+    h.entries.iter().rev().map(dto::HistoryItem::new).collect()
 }
 
 #[tauri::command]
@@ -691,6 +808,7 @@ pub fn run() {
         run: Mutex::new(None),
         dupes: Mutex::new(DupesState::default()),
         settings: Mutex::new(settings),
+        history: Mutex::new(History::load()),
         awake: Mutex::new(None),
         allow_close: AtomicBool::new(false),
         startup_paths: Mutex::new(existing_paths(args)),
@@ -816,6 +934,7 @@ pub fn run() {
             clear_thumb_cache,
             write_text_file,
             quit,
+            history_list,
             update::check_update,
             update::install_update,
             devtest::dev_report,

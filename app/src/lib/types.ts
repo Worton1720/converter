@@ -241,3 +241,20 @@ export interface UpdateInfo {
   /** Как установлена программа; `null` — переносная версия, обновляется вручную. */
   installer: "appimage" | "deb" | "nsis" | null;
 }
+
+/** Строка «Истории» (`dto::HistoryItem`). */
+export interface HistoryItem {
+  id: number;
+  finishedMs: number | null;
+  kind: "convert" | "dupes";
+  done: number;
+  skipped: number;
+  failed: number;
+  pending: number;
+  freed: number;
+  trashed: number;
+  deleted: number;
+  moved: number;
+  outputDirs: string[];
+  undone: boolean;
+}

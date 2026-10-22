@@ -15,7 +15,7 @@ import type {
   SourceAction,
 } from "./types";
 
-export type Tab = "convert" | "dupes" | "log";
+export type Tab = "convert" | "dupes" | "history" | "log";
 export type JobStatus = "waiting" | "running" | "done" | "skipped" | "failed" | "cancelled";
 
 export interface JobState {

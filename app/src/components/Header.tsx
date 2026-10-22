@@ -8,6 +8,7 @@ import { IconButton, Select } from "./ui";
 const TABS: { id: Tab; label: string }[] = [
   { id: "convert", label: "Преобразовать" },
   { id: "dupes", label: "Одинаковые файлы" },
+  { id: "history", label: "История" },
   { id: "log", label: "Подробности" },
 ];
 

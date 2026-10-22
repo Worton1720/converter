@@ -10,6 +10,7 @@ import type {
   KeepRule,
   LoadLevel,
   PhotoKind,
+  HistoryItem,
   UpdateInfo,
   Settings,
   SpaceCheck,
@@ -37,6 +38,7 @@ export const api = {
   cancelConvert: () => invoke<void>("cancel_convert"),
   cancelItem: (path: string) => invoke<void>("cancel_item", { path }),
 
+  historyList: () => invoke<HistoryItem[]>("history_list"),
   checkUpdate: () => invoke<UpdateInfo | null>("check_update"),
   installUpdate: () => invoke<void>("install_update"),
   dupesFind: (options: DupesOptions) => invoke<DupesResult>("dupes_find", { options }),
