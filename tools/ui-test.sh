@@ -49,7 +49,10 @@ if command -v xvfb-run >/dev/null; then
   xvfb-run -a -s "-screen 0 1600x1000x24" timeout 300 "${app[@]}" | tee "$work/result.log" || status=$?
 elif command -v kwin_wayland >/dev/null; then
   socket="ui-test-$$"
-  kwin_wayland --virtual --xwayland --width 1600 --height 1000 --socket "$socket" \
+  # Своя шина D-Bus: в общей вложенный KWin регистрирует свои горячие клавиши
+  # в kglobalaccel настоящего, а при выходе снимает их — у пользователя
+  # перестают работать Alt+Tab и прочие сочетания KWin до перезахода.
+  dbus-run-session -- kwin_wayland --virtual --xwayland --width 1600 --height 1000 --socket "$socket" \
     --exit-with-session "$root/tools/ui-test-app.sh" >"$work/kwin.log" 2>&1 || status=$?
   cat "$work/result.log" 2>/dev/null || true
   grep -q "итог: всё прошло" "$work/result.log" 2>/dev/null || status=1
