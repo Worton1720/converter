@@ -4,14 +4,18 @@
 #
 #   tools/fetch-ffmpeg.sh linux|windows [папка-назначения]
 #
-# Выпуски autobuild-* BtbN со временем удаляются. Если ссылка перестала работать — обновите
-# TAG/BUILD и контрольные суммы по https://github.com/BtbN/FFmpeg-Builds/releases.
+# Выпуски autobuild-* BtbN со временем удаляются, поэтому архивы продублированы в служебном
+# выпуске этого репозитория (MIRROR) — скрипт берёт оттуда, если у BtbN ссылки уже нет.
+# Новая версия ffmpeg: обновить TAG/BUILD и суммы по https://github.com/BtbN/FFmpeg-Builds/releases
+# и выложить оба архива копией:
+#   gh release create "$BUILD" <архивы> --target master --prerelease --latest=false --title "Служебное: копия сборки FFmpeg"
 set -euo pipefail
 
 TAG="autobuild-2026-10-21-13-06"
 BUILD="ffmpeg-n8.1.3-20-gc8de997cb1"
 SHA_LINUX="35168ba5f8edfa264eb2e2e3071d1b9d67d88ae667b665b284cb4be7f68ab23c"
 SHA_WINDOWS="3c018ceab05450a5ca7b628d102eee676ef6124580fab0c0bc033570d70523d5"
+MIRROR="https://github.com/Worton1720/converter/releases/download/$BUILD"
 
 platform="${1:?укажите linux или windows}"
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -31,7 +35,10 @@ fi
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 echo "скачиваю $archive"
-curl -fSL --retry 3 -o "$work/$archive" "https://github.com/BtbN/FFmpeg-Builds/releases/download/$TAG/$archive"
+if ! curl -fSL --retry 3 -o "$work/$archive" "https://github.com/BtbN/FFmpeg-Builds/releases/download/$TAG/$archive"; then
+  echo "у BtbN архива нет — беру копию из выпусков Converter"
+  curl -fSL --retry 3 -o "$work/$archive" "$MIRROR/$archive"
+fi
 echo "$sha  $work/$archive" | sha256sum -c -
 
 mkdir -p "$work/x"
