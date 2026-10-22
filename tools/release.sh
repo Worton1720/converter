@@ -26,6 +26,7 @@ done
 cargo update --workspace --quiet
 
 git add Cargo.toml Cargo.lock app/package.json app/src-tauri/tauri.conf.json
-git commit -m "Выпуск $version"
+# Первый выпуск идёт с версией, уже записанной в файлах, — тогда коммитить нечего.
+git diff --cached --quiet || git commit -m "Выпуск $version"
 git tag -a "v$version" -m "Converter $version"
 echo "готово: тег v$version. Опубликовать: git push --follow-tags"
