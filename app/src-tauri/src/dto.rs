@@ -278,3 +278,11 @@ impl HistoryItem {
         }
     }
 }
+
+/// Незаконченное преобразование после сбоя: что осталось сделать.
+#[derive(Serialize)]
+pub struct Interrupted {
+    pub id: u64,
+    pub pending: Vec<String>,
+    pub done: usize,
+}

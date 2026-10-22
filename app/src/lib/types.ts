@@ -265,3 +265,10 @@ export interface UndoReport {
   removed: number;
   problems: [string, string][];
 }
+
+/** Незаконченное преобразование после сбоя (`dto::Interrupted`). */
+export interface Interrupted {
+  id: number;
+  pending: string[];
+  done: number;
+}

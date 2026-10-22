@@ -11,6 +11,7 @@ import type {
   LoadLevel,
   PhotoKind,
   HistoryItem,
+  Interrupted,
   UndoReport,
   UpdateInfo,
   Settings,
@@ -33,8 +34,12 @@ export const api = {
     invoke<SpaceEstimate>("space_estimate", { options, paths }),
   spaceCheck: (options: ConvertOptions, paths: string[]) =>
     invoke<SpaceCheck[]>("space_check", { options, paths }),
-  startConvert: (options: ConvertOptions, paths: string[]) =>
-    invoke<void>("start_convert", { options, paths }),
+  /** `remember = false` — запуск со своими параметрами (доделать после сбоя), не как настройки. */
+  startConvert: (options: ConvertOptions, paths: string[], remember = true) =>
+    invoke<void>("start_convert", { options, paths, remember }),
+  historyInterrupted: () => invoke<Interrupted | null>("history_interrupted"),
+  historyResume: (id: number) => invoke<ConvertOptions>("history_resume", { id }),
+  historyDismiss: (id: number) => invoke<void>("history_dismiss", { id }),
   pauseConvert: (paused: boolean) => invoke<void>("pause_convert", { paused }),
   cancelConvert: () => invoke<void>("cancel_convert"),
   cancelItem: (path: string) => invoke<void>("cancel_item", { path }),

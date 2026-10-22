@@ -42,6 +42,8 @@ struct ActiveRun {
     handle: RunHandle,
     /// Путь → id задачи для отмены отдельных файлов.
     ids: Vec<PathBuf>,
+    /// Запись истории этого запуска.
+    history_id: u64,
 }
 
 impl AppState {
@@ -363,6 +365,7 @@ fn space_estimate(
 fn start_convert(
     options: ConvertOptions,
     paths: Vec<String>,
+    remember: Option<bool>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> CmdResult<()> {
@@ -376,7 +379,8 @@ fn start_convert(
         return Err("нет файлов для конвертации".into());
     }
     let ids = items.iter().map(|i| i.path.clone()).collect();
-    {
+    // «Доделать после сбоя» запускается со своими параметрами — они не должны стать настройками.
+    if remember.unwrap_or(true) {
         let mut settings = state.settings.lock().unwrap();
         settings.convert = options.clone();
         let _ = settings.save();
@@ -393,7 +397,11 @@ fn start_convert(
     }
     let handle = engine.convert(items, options);
     let events = handle.events.clone();
-    *run = Some(ActiveRun { handle, ids });
+    *run = Some(ActiveRun {
+        handle,
+        ids,
+        history_id,
+    });
     drop(run);
     state.update_awake();
     std::thread::spawn(move || forward_events(app, events, history_id));
@@ -727,6 +735,54 @@ async fn history_undo(id: u64, app: AppHandle) -> CmdResult<history::UndoReport>
     .map_err(err)?
 }
 
+/// Незаконченное преобразование: программа закрылась посреди работы (FR план, п. 7).
+#[tauri::command]
+fn history_interrupted(state: State<'_, AppState>) -> Option<dto::Interrupted> {
+    let active = state.run.lock().unwrap().as_ref().map(|r| r.history_id);
+    let h = state.history.lock().unwrap();
+    let e = h
+        .entries
+        .iter()
+        .rev()
+        .find(|e| e.finished_ms.is_none() && Some(e.id) != active)?;
+    let history::Action::Convert { pending, .. } = &e.action else {
+        return None;
+    };
+    let pending: Vec<String> = pending
+        .iter()
+        .filter(|p| p.exists())
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    let done = e.changes.len();
+    (!pending.is_empty()).then_some(dto::Interrupted {
+        id: e.id,
+        pending,
+        done,
+    })
+}
+
+/// «Доделать»: параметры того запуска; уже готовые результаты пропускаются — история
+/// сохраняется не чаще раза в 2 с, и последние сделанные файлы могли остаться в списке.
+#[tauri::command]
+fn history_resume(id: u64, state: State<'_, AppState>) -> CmdResult<ConvertOptions> {
+    let mut h = state.history.lock().unwrap();
+    let e = h.get_mut(id).ok_or("запись не найдена")?;
+    let history::Action::Convert { options, .. } = &e.action else {
+        return Err("это не преобразование".into());
+    };
+    let mut options = options.clone();
+    options.conflict = converter_core::options::ConflictPolicy::Skip;
+    e.finish();
+    h.save();
+    Ok(options)
+}
+
+/// «Не надо»: больше не предлагать доделать.
+#[tauri::command]
+fn history_dismiss(id: u64, state: State<'_, AppState>) {
+    state.with_history(id, true, history::Entry::finish);
+}
+
 #[tauri::command]
 fn dupes_report(state: State<'_, AppState>) -> Option<DupesResult> {
     let d = state.dupes.lock().unwrap();
@@ -980,6 +1036,9 @@ pub fn run() {
             quit,
             history_list,
             history_undo,
+            history_interrupted,
+            history_resume,
+            history_dismiss,
             update::check_update,
             update::install_update,
             devtest::dev_report,

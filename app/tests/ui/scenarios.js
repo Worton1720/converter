@@ -90,10 +90,21 @@
     checkElderlyRules("пустой экран");
   });
 
+  await test("после сбоя: «Доделать» одной кнопкой", async () => {
+    await until(() => text().includes("закрылась посреди работы"), "полоса «закрылась посреди работы»");
+    checkElderlyRules("после сбоя");
+    const conflictBefore = store().settings.convert.conflict;
+    await click("Доделать");
+    await until(() => store().order.some((p) => p.endsWith("IMG_C.png")), "файл снова в списке");
+    await until(() => !store().run.active && store().rows[store().order.find((p) => p.endsWith("IMG_C.png"))].job.status === "done", "файл доделан", 60000);
+    expect(!text().includes("закрылась посреди работы"), "полоса не исчезла");
+    expect(store().settings.convert.conflict === conflictBefore, "параметры «доделать» стали настройками");
+  });
+
   await test("сценарий 1: фото с телефона → JPEG", async () => {
     const added = await invoke("add_paths", { paths: [`${data}/phone`] });
     expect(added === 2, `добавлено ${added} файлов вместо 2`);
-    await until(() => store().order.length === 2, "файлы в списке");
+    await until(() => store().order.filter((p) => p.includes("/phone/")).length === 2, "файлы в списке");
     checkElderlyRules("список файлов");
     await click("Начать");
     const rows = () => store().order.map((p) => store().rows[p]);

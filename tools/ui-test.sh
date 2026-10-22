@@ -10,13 +10,18 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 work="$root/target/ui-test"
 rm -rf "$work"
-mkdir -p "$work"/{config,cache,state,data,files/phone,files/copies}
+mkdir -p "$work"/{config,cache,state/converter,data,files/phone,files/copies,files/crash}
 
 # Тестовые файлы: фото с телефона (HEIC + PNG) и точная копия для поиска одинаковых.
 cp crates/core/tests/fixtures/sample.heic "$work/files/phone/IMG_A.HEIC"
 ffmpeg -v error -f lavfi -i "gradients=s=480x360:c0=0x0f766e:c1=0xfde68a:seed=7" -frames:v 1 \
   "$work/files/phone/IMG_B.png"
 cp crates/core/tests/fixtures/sample.heic "$work/files/copies/Отпуск.heic"
+# «Сбой»: незакрытая запись истории с одним несделанным файлом — программа должна предложить доделать.
+ffmpeg -v error -f lavfi -i "gradients=s=320x240:c0=0x312e81:c1=0xfbcfe8:seed=3" -frames:v 1 \
+  "$work/files/crash/IMG_C.png"
+printf '{"entries":[{"id":1700000000000,"finished_ms":null,"action":{"Convert":{"options":{},"pending":["%s"],"skipped":0,"failed":0}},"changes":[],"undone":false}]}' \
+  "$work/files/crash/IMG_C.png" >"$work/state/converter/history.json"
 cp crates/core/tests/fixtures/sample.heic "$work/files/copies/Отпуск (копия).heic"
 
 # Без проверки обновлений: тест не должен ходить в сеть.
@@ -57,6 +62,7 @@ if [[ $status -eq 0 ]]; then
   for f in "phone/IMG_A.HEIC" "phone/IMG_B.png" "copies/Отпуск.heic" "copies/Отпуск (копия).heic"; do
     [[ -f "$work/files/$f" ]] || { echo "ui-test: нет файла $f после «Вернуть как было»"; status=1; }
   done
+  [[ -f "$work/files/crash/IMG_C.jpg" ]] || { echo "ui-test: «Доделать» не сделал crash/IMG_C.jpg"; status=1; }
   for f in "phone/IMG_A.jpg" "phone/IMG_B.jpg"; do
     [[ ! -e "$work/files/$f" ]] || { echo "ui-test: результат $f не убран при отмене"; status=1; }
   done
