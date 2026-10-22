@@ -331,6 +331,15 @@ fn space_check(
     engine::space_check(&selected_items(&state, &paths), &options)
 }
 
+#[tauri::command]
+fn space_estimate(
+    options: ConvertOptions,
+    paths: Vec<String>,
+    state: State<'_, AppState>,
+) -> engine::SpaceEstimate {
+    engine::space_estimate(&selected_items(&state, &paths), &options)
+}
+
 // ---------- конвертация ----------
 
 #[tauri::command]
@@ -778,6 +787,7 @@ pub fn run() {
             remove_items,
             clear_items,
             space_check,
+            space_estimate,
             start_convert,
             pause_convert,
             cancel_convert,

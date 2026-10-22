@@ -755,7 +755,33 @@ pub fn estimate_bytes(item: &MediaItem, opts: &ConvertOptions) -> u64 {
 
 /// Сколько места нужно на каждом томе результата и сколько там свободно.
 /// Возвращает только тома, где места не хватает.
+/// Сколько займёт результат, сколько занимают исходники и сколько свободно на дисках
+/// результата — для фразы перед стартом («понадобится ещё 2 ГБ»).
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+pub struct SpaceEstimate {
+    pub needed: u64,
+    pub sources: u64,
+    pub free: u64,
+}
+
+pub fn space_estimate(items: &[MediaItem], opts: &ConvertOptions) -> SpaceEstimate {
+    let mounts = space_by_mount(items, opts);
+    SpaceEstimate {
+        needed: mounts.iter().map(|m| m.needed).sum(),
+        sources: items.iter().map(|i| i.size).sum(),
+        free: mounts.iter().map(|m| m.free).sum(),
+    }
+}
+
+/// Диски, где результату не хватит места.
 pub fn space_check(items: &[MediaItem], opts: &ConvertOptions) -> Vec<SpaceCheck> {
+    space_by_mount(items, opts)
+        .into_iter()
+        .filter(|m| m.needed > m.free)
+        .collect()
+}
+
+fn space_by_mount(items: &[MediaItem], opts: &ConvertOptions) -> Vec<SpaceCheck> {
     use crate::options::OutputDir;
     let disks = sysinfo::Disks::new_with_refreshed_list();
     let mut needed: std::collections::HashMap<PathBuf, (u64, u64)> = Default::default();
@@ -775,7 +801,6 @@ pub fn space_check(items: &[MediaItem], opts: &ConvertOptions) -> Vec<SpaceCheck
     }
     let mut out: Vec<SpaceCheck> = needed
         .into_iter()
-        .filter(|(_, (need, free))| need > free)
         .map(|(mount, (needed, free))| SpaceCheck {
             mount,
             needed,

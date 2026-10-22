@@ -13,6 +13,7 @@ import type {
   UpdateInfo,
   Settings,
   SpaceCheck,
+  SpaceEstimate,
 } from "./types";
 
 export const api = {
@@ -26,6 +27,8 @@ export const api = {
   removeItems: (paths: string[]) => invoke<void>("remove_items", { paths }),
   clearItems: () => invoke<void>("clear_items"),
 
+  spaceEstimate: (options: ConvertOptions, paths: string[]) =>
+    invoke<SpaceEstimate>("space_estimate", { options, paths }),
   spaceCheck: (options: ConvertOptions, paths: string[]) =>
     invoke<SpaceCheck[]>("space_check", { options, paths }),
   startConvert: (options: ConvertOptions, paths: string[]) =>

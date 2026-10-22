@@ -176,6 +176,13 @@ export interface SpaceCheck {
   free: number;
 }
 
+/** Оценка места перед стартом (`engine::SpaceEstimate`). */
+export interface SpaceEstimate {
+  needed: number;
+  sources: number;
+  free: number;
+}
+
 export interface DupesOptions {
   roots: string[];
   recursive: boolean;
