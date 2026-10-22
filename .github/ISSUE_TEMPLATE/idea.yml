@@ -1,0 +1,11 @@
+name: Предложение
+description: Чего не хватает или что можно сделать удобнее
+labels: [предложение]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: Что хотелось бы
+      description: Опишите, какую задачу хотите решить, — не обязательно знать, как это сделать.
+    validations:
+      required: true

@@ -1,0 +1,55 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Converter",
+  "version": "0.1.0",
+  "identifier": "com.worton.converter",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Converter",
+        "width": 1320,
+        "height": 860,
+        "minWidth": 1100,
+        "minHeight": 700,
+        "dragDropEnabled": true,
+        "maximized": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src ipc: http://ipc.localhost thumb://localhost http://thumb.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis",
+      "appimage",
+      "deb"
+    ],
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico"
+    ],
+    "linux": {
+      "deb": {
+        "depends": [
+          "ffmpeg (>= 7:6.1)",
+          "libde265-0"
+        ]
+      }
+    },
+    "publisher": "Worton",
+    "copyright": "© 2026 Worton",
+    "license": "MIT",
+    "category": "Photography",
+    "shortDescription": "Конвертация фото и видео с телефона и поиск одинаковых файлов",
+    "longDescription": "Converter переводит фото HEIC и видео с iPhone в форматы, которые открываются везде, и находит одинаковые файлы, чтобы освободить место. Простой интерфейс в три шага."
+  }
+}

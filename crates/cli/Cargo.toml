@@ -1,0 +1,21 @@
+[package]
+name = "converter-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "converter"
+path = "src/main.rs"
+
+[features]
+embedded-libheif = ["converter-core/embedded-libheif"]
+
+[dependencies]
+converter-core.workspace = true
+anyhow.workspace = true
+crossbeam-channel.workspace = true
+clap = { version = "4", features = ["derive"] }
+indicatif = "0.18"
+ctrlc = "3"

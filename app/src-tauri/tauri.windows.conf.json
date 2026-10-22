@@ -1,0 +1,20 @@
+{
+  "bundle": {
+    "resources": {
+      "resources/ffmpeg/*": "ffmpeg/",
+      "resources/windows-dlls/*": "./"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": [
+          "Russian"
+        ],
+        "displayLanguageSelector": false
+      }
+    }
+  }
+}
