@@ -61,6 +61,8 @@ tools/release.sh X.Y.Z                        # версия во всех фа�
 
 ## Неочевидное
 
+Полный список встреченных проблем с причинами и решениями — [docs/LESSONS.md](docs/LESSONS.md): смотреть перед отладкой странного поведения, дописывать при каждой новой находке. Ниже — самое важное.
+
 - WebKitGTK не грузит `<img src="thumb://…">` со страницы другого источника, а `fetch` с CORS проходит: миниатюры идут через `lib/thumbs.ts` (fetch → blob-URL), ответы протокола содержат `Access-Control-Allow-Origin`. CSP в `tauri.conf.json` в dev-режиме не применяется — проверять её только релизной сборкой.
 - libx265 в ffmpeg 9 игнорирует выходные `-color_trc/-color_primaries`: цвет задаётся кадрам фильтром `setparams` (см. `build_args`).
 - У MOV и MP4 одинаковый `format_name` в ffprobe — различает только тег `major_brand`.
