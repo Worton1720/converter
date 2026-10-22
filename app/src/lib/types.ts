@@ -79,6 +79,8 @@ export type Similarity = "Off" | "Strict" | "Normal" | "Loose";
 export type Theme = "System" | "Light" | "Dark";
 
 export interface Settings {
+  /** Версия схемы `settings.toml` (миграции — `Settings::migrate` в ядре). */
+  version: number;
   convert: ConvertOptions;
   load: LoadLevel;
   ffmpeg: FfmpegSource;
