@@ -14,6 +14,17 @@ if [[ "$(git branch --show-current)" == master && -z "${ALLOW_MASTER:-}" ]]; the
   exit 1
 fi
 
+# Скрипты без бита запуска в git падают в CI с «Permission denied» (так было дважды):
+# при core.fileMode=false chmod на диске в индекс не попадает.
+step "Права на запуск скриптов"
+bad="$(git ls-files -s -- '*.sh' .githooks | awk '$1 != "100755" { print $4 }')"
+if [[ -n "$bad" ]]; then
+  echo "Без права на запуск в git:" >&2
+  echo "$bad" | sed 's/^/  /' >&2
+  echo "Исправить: git update-index --chmod=+x <файл>" >&2
+  exit 1
+fi
+
 step "cargo fmt"
 if ! cargo fmt --all --check >/dev/null; then
   echo "Код не отформатирован. Выполните: cargo fmt --all" >&2
