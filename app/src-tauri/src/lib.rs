@@ -16,7 +16,7 @@ use converter_core::fs_ops;
 use converter_core::governor::{Governor, LoadLevel};
 use converter_core::hw::{self, HwCaps};
 use converter_core::logfile::LogFile;
-use converter_core::media;
+use converter_core::media::{self, ImageKind};
 use converter_core::options::ConvertOptions;
 use converter_core::scan::{self, MediaItem, ScanOptions};
 use converter_core::settings::Settings;
@@ -465,6 +465,7 @@ async fn dupes_find(options: DupesOptions, app: AppHandle) -> CmdResult<DupesRes
         settings.dupes.kinds = options.kinds.clone();
         settings.dupes.include_hidden = options.include_hidden;
         settings.dupes.include_cloud = options.include_cloud;
+        settings.dupes.find_formats = options.find_formats;
         let _ = settings.save();
     }
     app.state::<AppState>().update_awake();
@@ -479,9 +480,12 @@ async fn dupes_find(options: DupesOptions, app: AppHandle) -> CmdResult<DupesRes
                 let _ = worker.emit("dupes:progress", p);
             }
         });
-        let keep = state.settings.lock().unwrap().dupes.keep.clone();
+        let (keep, keep_format) = {
+            let s = state.settings.lock().unwrap();
+            (s.dupes.keep.clone(), s.dupes.keep_format)
+        };
         let result = report.map(|r| {
-            let dto = DupesResult::new(&r, &keep);
+            let dto = DupesResult::new(&r, &keep, keep_format);
             state.dupes.lock().unwrap().report = Some(r);
             dto
         });
@@ -501,11 +505,17 @@ fn dupes_cancel(state: State<'_, AppState>) {
     }
 }
 
+/// Новые отметки по правилу «что оставить»; `keep_format` — для одного фото в разных форматах.
 #[tauri::command]
-fn dupes_auto(rule: KeepRule, state: State<'_, AppState>) -> CmdResult<Vec<Vec<bool>>> {
+fn dupes_auto(
+    rule: KeepRule,
+    keep_format: ImageKind,
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<Vec<bool>>> {
     {
         let mut settings = state.settings.lock().unwrap();
         settings.dupes.keep = rule.clone();
+        settings.dupes.keep_format = keep_format;
         let _ = settings.save();
     }
     let d = state.dupes.lock().unwrap();
@@ -513,7 +523,7 @@ fn dupes_auto(rule: KeepRule, state: State<'_, AppState>) -> CmdResult<Vec<Vec<b
     Ok(report
         .groups
         .iter()
-        .map(|g| dupes::auto_select(g, &rule))
+        .map(|g| dupes::auto_select(g, &rule, keep_format))
         .collect())
 }
 
@@ -547,8 +557,10 @@ async fn dupes_apply(
 #[tauri::command]
 fn dupes_report(state: State<'_, AppState>) -> Option<DupesResult> {
     let d = state.dupes.lock().unwrap();
-    let keep = state.settings.lock().unwrap().dupes.keep.clone();
-    d.report.as_ref().map(|r| DupesResult::new(r, &keep))
+    let s = state.settings.lock().unwrap();
+    d.report
+        .as_ref()
+        .map(|r| DupesResult::new(r, &s.dupes.keep, s.dupes.keep_format))
 }
 
 #[tauri::command]

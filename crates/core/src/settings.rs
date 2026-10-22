@@ -8,6 +8,7 @@ use crate::dupes::{KeepRule, KindFilter};
 use crate::error::{Error, IoContext, Result};
 use crate::ffmpeg::FfmpegSource;
 use crate::governor::LoadLevel;
+use crate::media::ImageKind;
 use crate::options::ConvertOptions;
 use crate::paths;
 
@@ -29,6 +30,10 @@ pub struct DupesSettings {
     pub keep: KeepRule,
     /// Не искать в путях, содержащих эти строки (FR-7.2).
     pub exclude: Vec<String>,
+    /// Искать одно фото в разных форматах (FR-9.2).
+    pub find_formats: bool,
+    /// Какой формат оставлять у одного фото в разных форматах; по умолчанию JPEG.
+    pub keep_format: ImageKind,
 }
 
 impl Default for DupesSettings {
@@ -40,6 +45,8 @@ impl Default for DupesSettings {
             include_cloud: false,
             keep: KeepRule::Oldest,
             exclude: Vec::new(),
+            find_formats: true,
+            keep_format: ImageKind::Jpeg,
         }
     }
 }

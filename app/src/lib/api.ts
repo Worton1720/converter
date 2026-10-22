@@ -9,6 +9,7 @@ import type {
   Item,
   KeepRule,
   LoadLevel,
+  PhotoKind,
   Settings,
   SpaceCheck,
 } from "./types";
@@ -34,7 +35,8 @@ export const api = {
 
   dupesFind: (options: DupesOptions) => invoke<DupesResult>("dupes_find", { options }),
   dupesCancel: () => invoke<void>("dupes_cancel"),
-  dupesAuto: (rule: KeepRule) => invoke<boolean[][]>("dupes_auto", { rule }),
+  dupesAuto: (rule: KeepRule, keepFormat: PhotoKind) =>
+    invoke<boolean[][]>("dupes_auto", { rule, keepFormat }),
   dupesApply: (marks: boolean[][], action: DupAction) =>
     invoke<ActionResult[]>("dupes_apply", { marks, action }),
   dupesExportCsv: (path: string, marks: boolean[][]) =>

@@ -44,11 +44,8 @@ pub fn thumbnail(tools: &Tools, path: &Path, kind: MediaKind, size: u32) -> Resu
     match kind {
         MediaKind::Video => video_frame(tools, path, size, &tmp)?,
         MediaKind::Image(kind) => {
-            let img = match kind {
-                ImageKind::Heif => heif_preview(path, size)?,
-                _ => generic_preview(path)?,
-            };
-            img.thumbnail(size, size)
+            preview(path, kind, size)?
+                .thumbnail(size, size)
                 .to_rgb8()
                 .save_with_format(&tmp, ::image::ImageFormat::Jpeg)
                 .map_err(|e| Error::Encode(e.to_string()))?;
@@ -56,6 +53,15 @@ pub fn thumbnail(tools: &Tools, path: &Path, kind: MediaKind, size: u32) -> Resu
     }
     std::fs::rename(&tmp, &out).at(&out)?;
     Ok(out)
+}
+
+/// Уменьшенная картинка с применённым поворотом, без кэша — для сравнения фото (FR-9.2).
+/// HEIC — по встроенной миниатюре, если она есть: полное декодирование 24 Мп занимает ~0,7 с.
+pub(crate) fn preview(path: &Path, kind: ImageKind, size: u32) -> Result<DynamicImage> {
+    match kind {
+        ImageKind::Heif => heif_preview(path, size),
+        _ => generic_preview(path),
+    }
 }
 
 /// Встроенная миниатюра HEIC, если её хватает по размеру; иначе основное изображение.

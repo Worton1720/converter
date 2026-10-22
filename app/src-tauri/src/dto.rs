@@ -3,7 +3,7 @@
 
 use serde::Serialize;
 
-use converter_core::dupes::{self, DupesReport, KeepRule};
+use converter_core::dupes::{self, DupesReport, GroupKind, KeepRule};
 use converter_core::governor::GovernorStatus;
 use converter_core::media::{ImageKind, MediaKind};
 use converter_core::scan::{LivePhoto, MediaItem};
@@ -144,10 +144,13 @@ pub struct DupFileDto {
     pub mtime_ms: f64,
     pub links: usize,
     pub kind: Option<&'static str>,
+    /// Формат фото («HEIC», «JPEG»…) — в группах «одно фото в разных форматах».
+    pub format: Option<&'static str>,
 }
 
 #[derive(Serialize)]
 pub struct DupGroupDto {
+    pub kind: GroupKind,
     pub size: u64,
     pub hash: String,
     pub files: Vec<DupFileDto>,
@@ -165,12 +168,13 @@ pub struct DupesResult {
 }
 
 impl DupesResult {
-    pub fn new(r: &DupesReport, keep: &KeepRule) -> Self {
+    pub fn new(r: &DupesReport, keep: &KeepRule, keep_format: ImageKind) -> Self {
         DupesResult {
             groups: r
                 .groups
                 .iter()
                 .map(|g| DupGroupDto {
+                    kind: g.kind,
                     size: g.size,
                     hash: g.hash.clone(),
                     files: g
@@ -185,6 +189,7 @@ impl DupesResult {
                                 MediaKind::Image(_) => "image",
                                 MediaKind::Video => "video",
                             }),
+                            format: f.format.map(ImageKind::label),
                         })
                         .collect(),
                 })
@@ -192,7 +197,7 @@ impl DupesResult {
             marks: r
                 .groups
                 .iter()
-                .map(|g| dupes::auto_select(g, keep))
+                .map(|g| dupes::auto_select(g, keep, keep_format))
                 .collect(),
             scanned: r.scanned,
             skipped_cloud: r.skipped_cloud,
