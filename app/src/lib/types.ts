@@ -54,8 +54,11 @@ export type KeepRule = "Oldest" | "Newest" | "ShortestPath" | { PriorityFolders:
 export type DupAction = "Trash" | "Delete" | { MoveTo: string };
 /** Формат фото в ядре (`media::ImageKind`). */
 export type PhotoKind = "Heif" | "Jpeg" | "Png" | "Webp" | "Bmp" | "Tiff";
-/** `Exact` — копии байт в байт; `Formats` — одно фото в разных форматах (FR-9.2). */
-export type GroupKind = "Exact" | "Formats";
+/** `Exact` — копии байт в байт; `Formats` — одно фото в разных форматах (FR-9.2);
+ *  `Similar` — похожие фото, сами не отмечаются (FR-9.1, FR-9.3). */
+export type GroupKind = "Exact" | "Formats" | "Similar";
+/** Насколько похожими должны быть фото (`dupes::Similarity`). */
+export type Similarity = "Off" | "Strict" | "Normal" | "Loose";
 export type Theme = "System" | "Light" | "Dark";
 
 export interface Settings {
@@ -75,6 +78,7 @@ export interface Settings {
     exclude: string[];
     find_formats: boolean;
     keep_format: PhotoKind;
+    similar: Similarity;
   };
   presets: { name: string; convert: ConvertOptions }[];
   scan_recursive: boolean;
@@ -162,6 +166,7 @@ export interface DupesOptions {
   exclude: string[];
   use_cache: boolean;
   find_formats: boolean;
+  similar: Similarity;
 }
 
 export interface DupFile {
@@ -170,13 +175,15 @@ export interface DupFile {
   mtimeMs: number;
   links: number;
   kind: "image" | "video" | null;
-  /** «HEIC», «JPEG»… — только в группах `Formats`. */
+  /** «HEIC», «JPEG»… — в группах `Formats` и `Similar`. */
   format: string | null;
+  /** Ширина и высота с учётом поворота — там же. */
+  pixels: [number, number] | null;
 }
 
 export interface DupGroup {
   kind: GroupKind;
-  /** Размер файла; в группах `Formats` — самого большого. */
+  /** Размер файла; в группах `Formats` и `Similar` — самого большого. */
   size: number;
   hash: string;
   files: DupFile[];

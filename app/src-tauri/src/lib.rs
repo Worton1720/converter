@@ -466,6 +466,7 @@ async fn dupes_find(options: DupesOptions, app: AppHandle) -> CmdResult<DupesRes
         settings.dupes.include_hidden = options.include_hidden;
         settings.dupes.include_cloud = options.include_cloud;
         settings.dupes.find_formats = options.find_formats;
+        settings.dupes.similar = options.similar;
         let _ = settings.save();
     }
     app.state::<AppState>().update_awake();

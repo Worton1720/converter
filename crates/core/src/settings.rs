@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::dupes::{KeepRule, KindFilter};
+use crate::dupes::{KeepRule, KindFilter, Similarity};
 use crate::error::{Error, IoContext, Result};
 use crate::ffmpeg::FfmpegSource;
 use crate::governor::LoadLevel;
@@ -34,6 +34,8 @@ pub struct DupesSettings {
     pub find_formats: bool,
     /// Какой формат оставлять у одного фото в разных форматах; по умолчанию JPEG.
     pub keep_format: ImageKind,
+    /// Искать похожие фото (FR-9.1); по умолчанию нет — это долго.
+    pub similar: Similarity,
 }
 
 impl Default for DupesSettings {
@@ -47,6 +49,7 @@ impl Default for DupesSettings {
             exclude: Vec::new(),
             find_formats: true,
             keep_format: ImageKind::Jpeg,
+            similar: Similarity::Off,
         }
     }
 }

@@ -84,7 +84,8 @@ export function CompareDialog({
   };
   const meta = (f: number) => {
     const file = group.files[f];
-    return `${file.format ? `${file.format}, ` : ""}${bytes(file.size)}, изменён ${date(file.mtimeMs)}`;
+    const pixels = file.pixels ? `${file.pixels[0]}×${file.pixels[1]}, ` : "";
+    return `${file.format ? `${file.format}, ` : ""}${pixels}${bytes(file.size)}, изменён ${date(file.mtimeMs)}`;
   };
 
   return (
@@ -119,7 +120,9 @@ export function CompareDialog({
       <p className="mb-4 text-[16px] text-muted">
         {group.kind === "Formats"
           ? "Это одно и то же фото в разных форматах: файлы не одинаковые, качество может немного отличаться. Увеличьте, чтобы сравнить, — обе картинки двигаются вместе."
-          : "Содержимое этих файлов полностью совпадает. При увеличении обе картинки двигаются вместе."}
+          : group.kind === "Similar"
+            ? "Эти фото похожи, но не одинаковы: это может быть соседний снимок серии или уменьшенная копия. Увеличьте, чтобы сравнить, — обе картинки двигаются вместе."
+            : "Содержимое этих файлов полностью совпадает. При увеличении обе картинки двигаются вместе."}
       </p>
       <div className="grid grid-cols-2 gap-5">
         <Side

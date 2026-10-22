@@ -12,7 +12,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 use converter_core::dupes::{
-    self, DupAction, DupesOptions, DupesProgress, GroupKind, KeepRule, KindFilter,
+    self, DupAction, DupesOptions, DupesProgress, GroupKind, KeepRule, KindFilter, Similarity,
 };
 use converter_core::engine::Engine;
 use converter_core::events::{Event, JobOutcome, LogLevel, SourceAction};
@@ -232,6 +232,14 @@ impl FormatArg {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
+enum SimilarArg {
+    Off,
+    Strict,
+    Normal,
+    Loose,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
 enum ActionArg {
     Report,
     Trash,
@@ -257,6 +265,9 @@ struct DupesArgs {
     /// Не искать одно фото в разных форматах
     #[arg(long)]
     no_formats: bool,
+    /// Похожие фото (серии, пересжатые копии): только показываются, сами не убираются
+    #[arg(long, value_enum, default_value = "off")]
+    similar: SimilarArg,
     #[arg(long, value_enum, default_value = "report")]
     action: ActionArg,
     /// Папка для --action move
@@ -658,6 +669,12 @@ fn run_dupes(args: DupesArgs) -> anyhow::Result<ExitCode> {
         },
         use_cache: !args.no_cache,
         find_formats: !args.no_formats && !args.videos,
+        similar: match args.similar {
+            SimilarArg::Off => Similarity::Off,
+            SimilarArg::Strict => Similarity::Strict,
+            SimilarArg::Normal => Similarity::Normal,
+            SimilarArg::Loose => Similarity::Loose,
+        },
         ..Default::default()
     };
     let bar = ProgressBar::new_spinner();
@@ -677,7 +694,13 @@ fn run_dupes(args: DupesArgs) -> anyhow::Result<ExitCode> {
             done,
             total,
             ..
-        } => bar.set_message(format!("Одно фото в разных форматах: {done}/{total}")),
+        } => bar.set_message(format!("Сведения о фото: {done}/{total}")),
+        DupesProgress::Hashing {
+            stage: 5,
+            done,
+            total,
+            ..
+        } => bar.set_message(format!("Сравнение фото по изображению: {done}/{total}")),
         DupesProgress::Hashing {
             done,
             total,
@@ -734,6 +757,10 @@ fn run_dupes(args: DupesArgs) -> anyhow::Result<ExitCode> {
                     " — убрать: --formats"
                 }
             ),
+            GroupKind::Similar => println!(
+                "\nПохожие фото: {} (не отмечаются — решите сами)",
+                g.files.len()
+            ),
         }
         for (f, &remove) in g.files.iter().zip(&m) {
             let links = if f.links.is_empty() {
@@ -741,10 +768,11 @@ fn run_dupes(args: DupesArgs) -> anyhow::Result<ExitCode> {
             } else {
                 format!(" (+{} жёстк. ссылок на этот же файл)", f.links.len())
             };
-            let format = f
-                .format
-                .map(|k| format!(" [{}, {}]", k.label(), human(f.size)))
-                .unwrap_or_default();
+            let format = match (f.format, f.pixels) {
+                (Some(k), Some((w, h))) => format!(" [{}, {w}×{h}, {}]", k.label(), human(f.size)),
+                (Some(k), None) => format!(" [{}, {}]", k.label(), human(f.size)),
+                _ => String::new(),
+            };
             println!(
                 "  {} {}{format}{links}",
                 if remove { "✗" } else { "✓" },
@@ -761,16 +789,14 @@ fn run_dupes(args: DupesArgs) -> anyhow::Result<ExitCode> {
     };
     let reclaim: u64 = marked().map(|(f, _)| f.size).sum();
     let to_remove = marked().count();
-    let formats = report
-        .groups
-        .iter()
-        .filter(|g| g.kind == GroupKind::Formats)
-        .count();
+    let count = |kind| report.groups.iter().filter(|g| g.kind == kind).count();
     println!(
-        "\nПроверено файлов: {}. Групп копий: {}, одно фото в разных форматах: {formats}. \
+        "\nПроверено файлов: {}. Групп копий: {}, одно фото в разных форматах: {}, похожих фото: {}. \
          Будет убрано: {to_remove}, освободится {}.",
         report.scanned,
-        report.groups.len() - formats,
+        count(GroupKind::Exact),
+        count(GroupKind::Formats),
+        count(GroupKind::Similar),
         human(reclaim)
     );
     if report.skipped_cloud > 0 {

@@ -144,8 +144,10 @@ pub struct DupFileDto {
     pub mtime_ms: f64,
     pub links: usize,
     pub kind: Option<&'static str>,
-    /// Формат фото («HEIC», «JPEG»…) — в группах «одно фото в разных форматах».
+    /// Формат фото («HEIC», «JPEG»…) — в группах «одно фото в разных форматах» и «похожие».
     pub format: Option<&'static str>,
+    /// Размер в пикселях с учётом поворота — там же.
+    pub pixels: Option<[u32; 2]>,
 }
 
 #[derive(Serialize)]
@@ -190,6 +192,7 @@ impl DupesResult {
                                 MediaKind::Video => "video",
                             }),
                             format: f.format.map(ImageKind::label),
+                            pixels: f.pixels.map(|(w, h)| [w, h]),
                         })
                         .collect(),
                 })
