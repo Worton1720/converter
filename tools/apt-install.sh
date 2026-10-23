@@ -6,8 +6,15 @@
 #   tools/apt-install.sh пакет…
 set -uo pipefail
 
+# Загруженные пакеты — в ~/apt-archives: эту папку сохраняет и возвращает шаг «Кэш пакетов apt»
+# в workflow, и следующий прогон ставит их без зеркала.
+archives="$HOME/apt-archives"
+mkdir -p "$archives/partial"
 opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
-  -o DPkg::Lock::Timeout=120)
+  -o DPkg::Lock::Timeout=120 -o Dir::Cache::Archives="$archives" -o APT::Keep-Downloaded-Packages=true)
+
+# apt пишет кэш от root — иначе actions/cache не сможет его прочитать и сохранить.
+own_cache() { sudo chown -R "$(id -u):$(id -g)" "$archives"; }
 # Попытка 2 — основной архив Ubuntu, 3 — ближайшее зеркало по списку Ubuntu.
 mirrors=("" "http://archive.ubuntu.com/ubuntu" "mirror+http://mirrors.ubuntu.com/mirrors.txt")
 
@@ -26,10 +33,12 @@ for attempt in 1 2 3; do
   fi
   if timeout 240 sudo apt-get "${opts[@]}" update &&
     timeout 600 sudo apt-get "${opts[@]}" install -y "$@"; then
+    own_cache
     exit 0
   fi
   echo "::warning::apt-get: попытка $attempt не удалась, повторяю"
   sleep 15
 done
+own_cache
 echo "::error::apt-get: пакеты не установились за 3 попытки"
 exit 1
