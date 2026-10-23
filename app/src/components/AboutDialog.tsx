@@ -46,6 +46,12 @@ export function AboutDialog({ open, onClose }: { open: boolean; onClose: () => v
             Переводит фото и видео с телефона в форматы, которые открываются везде, и находит одинаковые файлы.
             Распространяется бесплатно по лицензии MIT.
           </p>
+          {info?.portable_dir && (
+            <p className="text-muted">
+              Переносная версия: настройки и журналы хранятся рядом с программой, в папке «{info.portable_dir}».
+              Обновляется вручную — скачайте новый архив и замените файлы, папку data оставьте.
+            </p>
+          )}
         </div>
         <div className="space-y-2">
           <h3 className="text-[18px] font-semibold">Что входит в программу</h3>

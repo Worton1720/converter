@@ -126,6 +126,8 @@ export interface AppInfo {
   settings: Settings;
   settings_path: string;
   log_path: string;
+  /** Переносная версия: папка с её данными рядом с программой. */
+  portable_dir: string | null;
   startup_paths: string[];
   status: GovernorStatus | null;
 }

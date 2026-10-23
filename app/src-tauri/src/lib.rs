@@ -202,6 +202,8 @@ fn app_info_of(state: &AppState) -> AppInfo {
         settings: state.settings.lock().unwrap().clone(),
         settings_path: Settings::path().to_string_lossy().into_owned(),
         log_path: state.log.path().to_string_lossy().into_owned(),
+        portable_dir: converter_core::paths::portable_root()
+            .map(|p| p.to_string_lossy().into_owned()),
         startup_paths: std::mem::take(&mut *state.startup_paths.lock().unwrap()),
         status: state.governor.last_status(),
     }
@@ -899,6 +901,13 @@ fn existing_paths(args: impl IntoIterator<Item = String>) -> Vec<String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Переносная версия: данные WebView2 (кэш страницы, хранилище) — тоже рядом с программой,
+    // а не в %LOCALAPPDATA%. Переменную WebView2 читает при создании окна.
+    #[cfg(windows)]
+    if let Some(root) = converter_core::paths::portable_root() {
+        // SAFETY: до запуска потоков — окружение никто не читает параллельно.
+        unsafe { std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", root.join("webview")) };
+    }
     let args = devtest::take_args(std::env::args().skip(1).collect());
     let removed = fs_ops::cleanup_stale_temps();
     let settings = Settings::load();
@@ -957,9 +966,14 @@ pub fn run() {
             }
         }))
     };
+    // Размер, положение и «развёрнуто» окна между запусками (FR-13.5). Не в переносной версии:
+    // модуль пишет в профиль пользователя, а она не должна оставлять там следов.
+    let builder = if converter_core::paths::portable_root().is_some() {
+        builder
+    } else {
+        builder.plugin(tauri_plugin_window_state::Builder::default().build())
+    };
     builder
-        // Размер, положение и «развёрнуто» окна между запусками (FR-13.5).
-        .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())

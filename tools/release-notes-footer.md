@@ -4,7 +4,7 @@
 | У вас | Скачайте |
 |---|---|
 | Windows 10 или 11 | `Converter-…-windows-x64-setup.exe` — установщик: запустите и нажимайте «Далее» |
-| Windows без установки | `Converter-…-windows-x64-portable.zip` — распакуйте и запустите `Converter.exe` |
+| Windows без установки | `Converter-…-windows-x64-portable.zip` — переносная версия: распакуйте куда угодно, хоть на флешку, и запустите `Converter.exe`; настройки хранятся рядом с ней |
 | Linux, любой | `Converter-…-linux-x86_64.AppImage` — разрешите запуск в свойствах файла и откройте |
 | Ubuntu 24.04 и новее, Debian 13 | `Converter-…-linux-amd64.deb` — откройте двойным щелчком, установит «Центр приложений» |
 

@@ -194,6 +194,8 @@ jobs:
           Copy-Item target/release/converter.exe "$dir/converter-cli.exe"
           Copy-Item app/src-tauri/resources/windows-dlls/*.dll $dir/
           Copy-Item app/src-tauri/resources/ffmpeg/* "$dir/ffmpeg/"
+          # Признак переносного режима (crates/core/src/paths.rs) — данные в «data» рядом с программой.
+          Copy-Item tools/portable.txt "$dir/portable.txt"
           Compress-Archive -Path "$dir/*" -DestinationPath "dist/Converter-$env:VERSION-windows-x64-portable.zip"
           $cli = "converter-cli"
           New-Item -ItemType Directory -Force $cli | Out-Null
@@ -203,6 +205,18 @@ jobs:
           New-Item -ItemType Directory -Force updater | Out-Null
           Get-Item target/release/bundle/nsis/*.exe.sig -ErrorAction SilentlyContinue |
             ForEach-Object { Copy-Item $_ "updater/Converter-$env:VERSION-windows-x64-setup.exe.sig" }
+      - name: Переносная версия — всё своё рядом с программой
+        shell: bash
+        run: |
+          # Git Bash: путь вида /d/a/_temp — иначе «D:» ломает PATH; для pwsh — обратно в D:\….
+          dir="$(cygpath -u "$RUNNER_TEMP")/portable"
+          pwsh -Command "Expand-Archive 'dist/Converter-$VERSION-windows-x64-portable.zip' '$(cygpath -w "$dir")'"
+          [[ -f "$dir/portable.txt" && -f "$dir/Converter.exe" && -f "$dir/ffmpeg/ffmpeg.exe" ]] ||
+            { echo "::error::в переносной версии не хватает файлов"; ls -R "$dir"; exit 1; }
+          # Консольная программа из архива: свой ffmpeg рядом, DLL рядом, данные — в data.
+          PATH="$dir/ffmpeg:$PATH" tools/smoke-test.sh "$dir/converter-cli.exe"
+          [[ -f "$dir/data/cache/hw-detect.json" ]] ||
+            { echo "::error::переносная версия записала данные не в папку data"; exit 1; }
       - name: Распаковать CLI для проверки
         shell: pwsh
         run: Expand-Archive "dist/converter-cli-$env:VERSION-windows-x64.zip" "$env:RUNNER_TEMP/smoke-cli"

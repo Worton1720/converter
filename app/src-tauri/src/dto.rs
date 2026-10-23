@@ -44,6 +44,8 @@ pub struct AppInfo {
     pub settings: Settings,
     pub settings_path: String,
     pub log_path: String,
+    /// Переносная версия: папка с её данными рядом с программой.
+    pub portable_dir: Option<String>,
     pub startup_paths: Vec<String>,
     pub status: Option<GovernorStatus>,
 }
