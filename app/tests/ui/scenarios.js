@@ -164,6 +164,29 @@
     await until(() => text().includes("Готово, всё вернулось как было"), "итог отмены преобразования");
   });
 
+  await test("выделение: выбрать нажатием, действия над выбранными", async () => {
+    store().setTab("convert");
+    await invoke("add_paths", { paths: [`${data}/copies`] });
+    await until(() => store().order.length >= 4, "файлы в списке");
+    const tile = (name) =>
+      [...document.querySelectorAll("[role=button][aria-pressed]")].find((t) => t.getAttribute("aria-label").startsWith(name));
+    const first = await until(() => tile("Отпуск.heic"), "картинка «Отпуск.heic»");
+    first.click();
+    await until(() => text().includes(`Выбрано 1 из ${store().order.length}`), "полоса «Выбрано 1 из …»");
+    expect(button("Начать — выбранные (1)"), "кнопка «Начать» не про выбранные");
+    expect(text().includes("Будет обработано только выбранные: 1 фото"), "нет пояснения про выбранные");
+    checkElderlyRules("выделение");
+    // Shift — диапазон от прошлого нажатия.
+    const second = tile("Отпуск (копия).heic");
+    second.dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true }));
+    await until(() => store().selected.size >= 2, "выбор диапазоном");
+    await click("Убрать выбранные из списка");
+    await until(() => !store().order.some((p) => p.includes("/copies/")), "выбранные убраны из списка");
+    expect(store().selected.size === 0, "после удаления осталось выделение");
+    const starts = [...document.querySelectorAll("button")].filter(visible).map((b) => b.textContent.trim()).filter((t) => t.startsWith("Начать"));
+    expect(!starts.some((t) => t.includes("выбранные")), `осталась кнопка про выбранные: ${JSON.stringify(starts)}`);
+  });
+
   await test("перенос с телефона: мастер по шагам", async () => {
     store().setTab("convert");
     await click("Перенести с телефона");

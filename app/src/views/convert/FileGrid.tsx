@@ -2,6 +2,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import clsx from "clsx";
 import { Check } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { Checkbox } from "../../components/ui";
 import { useStore, type Row } from "../../lib/store";
 import { Thumb } from "./FileTable";
 
@@ -47,6 +48,8 @@ function TileStatus({ row }: { row: Row }) {
 
 export function FileGrid({ paths }: { paths: string[] }) {
   const rows = useStore((s) => s.rows);
+  const selected = useStore((s) => s.selected);
+  const clickSelect = useStore((s) => s.clickSelect);
   const parentRef = useRef<HTMLDivElement>(null);
   const [columns, setColumns] = useState(4);
 
@@ -80,16 +83,29 @@ export function FileGrid({ paths }: { paths: string[] }) {
             {paths.slice(v.index * columns, v.index * columns + columns).map((path) => {
               const row = rows[path];
               if (!row) return null;
+              const isSel = selected.has(path);
+              // Нажатие по картинке выбирает её (ТЗ 8.5: без Ctrl); Shift — диапазон.
               return (
                 <div
                   key={path}
+                  role="button"
+                  aria-pressed={isSel}
+                  aria-label={`${row.item.name}${isSel ? ", выбрано" : ""}`}
+                  onClick={(e) => clickSelect(path, paths, e.shiftKey)}
                   style={{ width: TILE, height: TILE_HEIGHT }}
                   className={clsx(
-                    "flex shrink-0 flex-col gap-2 rounded-xl border bg-surface p-2",
-                    row.job.status === "failed" ? "border-err" : "border-line",
+                    "relative flex shrink-0 cursor-pointer flex-col gap-2 rounded-xl border-2 bg-surface p-2",
+                    isSel ? "border-accent bg-accent-soft" : row.job.status === "failed" ? "border-err" : "border-line",
                   )}
                 >
                   <Thumb path={path} kind={row.item.kind} size={150} />
+                  <Checkbox
+                    tone="select"
+                    checked={isSel}
+                    onChange={() => clickSelect(path, paths, false)}
+                    label={`Выбрать ${row.item.name}`}
+                    className="absolute top-1 left-1 bg-surface/80"
+                  />
                   <div className="min-w-0 px-1">
                     <div className="truncate text-[14px]" title={row.item.name}>
                       {row.item.name}
