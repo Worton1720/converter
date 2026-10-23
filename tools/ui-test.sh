@@ -9,7 +9,8 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 work="$root/target/ui-test"
-rm -rf "$work"
+# Службы прошлого вложенного сеанса (kwalletd) могут ещё дописывать в папку — повторить.
+rm -rf "$work" 2>/dev/null || { sleep 3; rm -rf "$work"; }
 mkdir -p "$work"/{config,cache,state/converter,data,files/phone,files/copies,files/crash}
 
 # Тестовые файлы: фото с телефона (HEIC + PNG) и точная копия для поиска одинаковых.
@@ -52,7 +53,13 @@ elif command -v kwin_wayland >/dev/null; then
   # Своя шина D-Bus: в общей вложенный KWin регистрирует свои горячие клавиши
   # в kglobalaccel настоящего, а при выходе снимает их — у пользователя
   # перестают работать Alt+Tab и прочие сочетания KWin до перезахода.
-  dbus-run-session -- kwin_wayland --virtual --xwayland --width 1600 --height 1000 --socket "$socket" \
+  # Своя папка XDG_RUNTIME_DIR: службы вложенного сеанса (сокеты Wayland, at-spi/bus_0)
+  # иначе пишут в /run/user/<uid> поверх настоящих — у пользователя ломалась служба
+  # специальных возможностей AT-SPI, и программы запускались с задержкой.
+  runtime="$work/runtime"
+  mkdir -p -m 700 "$runtime"
+  XDG_RUNTIME_DIR="$runtime" NO_AT_BRIDGE=1 dbus-run-session -- \
+    kwin_wayland --virtual --xwayland --width 1600 --height 1000 --socket "$socket" \
     --exit-with-session "$root/tools/ui-test-app.sh" >"$work/kwin.log" 2>&1 || status=$?
   cat "$work/result.log" 2>/dev/null || true
   grep -q "итог: всё прошло" "$work/result.log" 2>/dev/null || status=1
