@@ -41,7 +41,7 @@ tools/ui-test.sh                              # автотесты интерф�
 
 Интеграционные тесты (`crates/core/tests/integration.rs`) используют `data_media/` и ffmpeg из системы; без них тихо пропускаются.
 
-Системные зависимости: ffmpeg/ffprobe ≥ 6.1 (в `PATH` или `tools/ffmpeg/`), libheif (Linux — пакет, Windows — `vcpkg install "libheif[core,libde265]:x64-windows"`, динамически из-за LGPL; без фичи `hevc` по умолчанию — она тянет GPL-кодировщик x265, а нам нужно только чтение), для GUI на Linux — WebKitGTK 4.1. lcms2 и libwebp собираются из исходников крейтами.
+Системные зависимости: ffmpeg/ffprobe ≥ 6.1 (в `PATH` или `tools/ffmpeg/`), libheif (Linux — пакет, Windows — `vcpkg install "libheif[core,libde265]:x64-windows"`, динамически из-за LGPL; без фичи `hevc` по умолчанию — она тянет GPL-кодировщик x265, а нам нужно только чтение), для GUI на Linux — WebKitGTK 4.1. lcms2 и libwebp собираются из исходников крейтами. libjpeg-turbo (кодирование JPEG, крейт `turbojpeg`, обязательно со SIMD): локально — системная ≥ 3.0 через pkg-config (`.cargo/config.toml`), в CI и выпусках `TURBOJPEG_SOURCE=vendor TURBOJPEG_STATIC=1` — из исходников, нужны cmake и nasm.
 
 ## Архитектура
 

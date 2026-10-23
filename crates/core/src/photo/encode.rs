@@ -3,8 +3,6 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-use jpeg_encoder::{ColorType, Encoder as JpegEncoder, SamplingFactor};
-
 use super::webp_mux;
 use super::{Decoded, Pixels};
 use crate::error::{Error, IoContext, Result};
@@ -62,31 +60,65 @@ pub fn png(img: &Decoded, dest: &Path, compression: PngCompression) -> Result<()
     Ok(())
 }
 
+/// JPEG через libjpeg-turbo (SIMD), 4:2:0. Метаданные — сегментами сразу после SOI и JFIF:
+/// профиль цвета (APP2, частями), EXIF и XMP (APP1).
 pub fn jpeg(img: &Decoded, dest: &Path, quality: u8) -> Result<()> {
     let Pixels::Rgb8(data) = &img.pixels else {
         return Err(Error::Encode("JPEG ожидает RGB 8 бит".into()));
     };
-    let mut out = create(dest)?;
-    let mut encoder = JpegEncoder::new(&mut out, quality.clamp(1, 100));
-    encoder.set_sampling_factor(SamplingFactor::F_2_2);
+    let mut c = turbojpeg::Compressor::new().map_err(encode_err)?;
+    c.set_quality(i32::from(quality.clamp(1, 100)))
+        .map_err(encode_err)?;
+    c.set_subsamp(turbojpeg::Subsamp::Sub2x2)
+        .map_err(encode_err)?;
+    let jpeg = c
+        .compress_to_vec(turbojpeg::Image {
+            pixels: data.as_slice(),
+            width: img.width as usize,
+            pitch: img.width as usize * 3,
+            height: img.height as usize,
+            format: turbojpeg::PixelFormat::RGB,
+        })
+        .map_err(encode_err)?;
+    let mut segments: Vec<u8> = Vec::new();
+    let mut push = |marker: u8, payload: &[u8]| {
+        segments.extend_from_slice(&[0xFF, marker]);
+        segments.extend_from_slice(&((payload.len() + 2) as u16).to_be_bytes());
+        segments.extend_from_slice(payload);
+    };
     if let Some(icc) = &img.icc {
-        encoder.add_icc_profile(icc).map_err(encode_err)?;
+        // ICC в APP2 частями до 65 519 байт: «ICC_PROFILE\0», номер, всего частей.
+        let chunks: Vec<&[u8]> = icc.chunks(65_519).collect();
+        for (i, chunk) in chunks.iter().enumerate() {
+            let mut p = b"ICC_PROFILE\0".to_vec();
+            p.extend_from_slice(&[(i + 1) as u8, chunks.len() as u8]);
+            p.extend_from_slice(chunk);
+            push(0xE2, &p);
+        }
     }
     if let Some(exif) = img.exif.as_ref().filter(|e| e.len() + 6 <= JPEG_APP1_MAX) {
-        encoder.add_exif_metadata(exif).map_err(encode_err)?;
+        let mut p = b"Exif\0\0".to_vec();
+        p.extend_from_slice(exif);
+        push(0xE1, &p);
     }
     if let Some(xmp) = img
         .xmp
         .as_ref()
         .filter(|x| x.len() + XMP_JPEG_HEADER.len() <= JPEG_APP1_MAX)
     {
-        let mut segment = XMP_JPEG_HEADER.to_vec();
-        segment.extend_from_slice(xmp);
-        encoder.add_app_segment(1, segment).map_err(encode_err)?;
+        let mut p = XMP_JPEG_HEADER.to_vec();
+        p.extend_from_slice(xmp);
+        push(0xE1, &p);
     }
-    encoder
-        .encode(data, img.width as u16, img.height as u16, ColorType::Rgb)
-        .map_err(encode_err)?;
+    // После SOI и APP0 (JFIF), если он есть.
+    let mut at = 2;
+    if jpeg.get(2..4) == Some(&[0xFF, 0xE0]) {
+        at += 2 + usize::from(u16::from_be_bytes([jpeg[4], jpeg[5]]));
+    }
+    let mut out = create(dest)?;
+    out.write_all(&jpeg[..at]).at(dest)?;
+    out.write_all(&segments).at(dest)?;
+    out.write_all(&jpeg[at..]).at(dest)?;
     out.flush().at(dest)?;
     Ok(())
 }

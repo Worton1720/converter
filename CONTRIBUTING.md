@@ -5,6 +5,7 @@
 - Rust 1.88+, Node.js 22+ и pnpm 11;
 - ffmpeg и ffprobe 6.1+ в `PATH` (или в `tools/ffmpeg/`);
 - libheif: на Linux — пакеты `libheif-dev` и `libheif-plugin-libde265` (без плагина HEIC не открывается), на Windows — `vcpkg install "libheif[core,libde265]:x64-windows"` (без x265: он под GPL, а HEIC нужно только читать; в старых vcpkg, где libde265 не фича, — `libheif[core]`);
+- libjpeg-turbo ≥ 3.0 в системе (`pkg-config libturbojpeg`); если в дистрибутиве старее — cmake и nasm и `TURBOJPEG_SOURCE=vendor` (библиотека соберётся из исходников);
 - для интерфейса на Linux — WebKitGTK 4.1 (`libwebkit2gtk-4.1-dev`);
 - для выпускных сборок Linux — ещё cmake и libde265 (libheif собирается из исходников и вшивается в программу).
 
