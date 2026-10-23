@@ -10,6 +10,7 @@ import { bytes, files, plural } from "../../lib/format";
 import { useStore } from "../../lib/store";
 import type { PhonePlan, PhoneReport, PhoneSource } from "../../lib/types";
 import { addPaths } from "./ConvertView";
+import { PhoneGallery } from "./PhoneGallery";
 
 type Stage =
   | { kind: "search" }
@@ -17,7 +18,7 @@ type Stage =
   | { kind: "choose"; sources: PhoneSource[] }
   | { kind: "planning"; found: number }
   | { kind: "ready"; plan: PhonePlan }
-  | { kind: "copying"; plan: PhonePlan; files: number; bytes: number }
+  | { kind: "copying"; count: number; total: number; files: number; bytes: number }
   | { kind: "done"; report: PhoneReport }
   | { kind: "error"; message: string };
 
@@ -35,13 +36,17 @@ export function PhoneWizard({ open: isOpen, onClose }: { open: boolean; onClose:
   const [stage, setStage] = useState<Stage>({ kind: "search" });
   const [device, setDevice] = useState<{ index: number; name: string } | null>(null);
   const [dest, setDest] = useState<string | null>(null);
+  /** Выбранное в галерее (номера в плане); по умолчанию — всё новое. */
+  const [picked, setPicked] = useState<Set<number>>(new Set());
   const addLog = useStore((s) => s.addLog);
 
   const plan = async (index: number, folder: string) => {
     setStage({ kind: "planning", found: 0 });
     const un = await listen<number>("phone:scan", (e) => setStage({ kind: "planning", found: e.payload }));
     try {
-      setStage({ kind: "ready", plan: await api.phonePlan(index, folder) });
+      const p = await api.phonePlan(index, folder);
+      setPicked(new Set(p.items.map((_, i) => i)));
+      setStage({ kind: "ready", plan: p });
     } catch (e) {
       setStage({ kind: "error", message: String(e) });
     } finally {
@@ -79,12 +84,14 @@ export function PhoneWizard({ open: isOpen, onClose }: { open: boolean; onClose:
   };
 
   const start = async (p: PhonePlan) => {
-    setStage({ kind: "copying", plan: p, files: 0, bytes: 0 });
+    const chosen = [...picked].sort((a, b) => a - b);
+    const total = chosen.reduce((sum, i) => sum + p.items[i].size, 0);
+    setStage({ kind: "copying", count: chosen.length, total, files: 0, bytes: 0 });
     const un = await listen<{ files: number; bytes: number }>("phone:progress", (e) =>
-      setStage({ kind: "copying", plan: p, ...e.payload }),
+      setStage({ kind: "copying", count: chosen.length, total, ...e.payload }),
     );
     try {
-      const report = await api.phoneImport();
+      const report = await api.phoneImport(chosen);
       for (const [src, err] of report.failed) addLog("Warn", `${src}: ${err}`);
       setStage({ kind: "done", report });
     } catch (e) {
@@ -165,16 +172,36 @@ export function PhoneWizard({ open: isOpen, onClose }: { open: boolean; onClose:
       break;
     case "ready": {
       const p = stage.plan;
+      const pickedBytes = [...picked].reduce((sum, i) => sum + (p.items[i]?.size ?? 0), 0);
       body = (
         <div className="space-y-4 text-[18px] leading-relaxed">
           <p>
             Телефон: <span className="font-semibold">{device?.name}</span>
           </p>
           {p.count > 0 ? (
-            <p>
-              Можно перенести {media(p.photos, p.videos)} — <span className="font-semibold">{bytes(p.bytes)}</span>.
-              {p.already > 0 && ` Ещё ${files(p.already)} уже перенесено раньше, их программа пропустит.`}
-            </p>
+            <>
+              <p>
+                Можно перенести {media(p.photos, p.videos)} — <span className="font-semibold">{bytes(p.bytes)}</span>.
+                {p.already > 0 && ` Ещё ${files(p.already)} уже перенесено раньше, их здесь нет.`} Нажмите на снимок,
+                чтобы не переносить его.
+              </p>
+              <div className="sticky -top-5 z-10 -mx-6 flex flex-wrap items-center gap-3 border-y border-line bg-accent-soft px-6 py-2">
+                <span className="text-[16px] font-medium">
+                  Выбрано {picked.size} из {p.count} ({bytes(pickedBytes)})
+                </span>
+                <Button
+                  variant="ghost"
+                  disabled={picked.size === p.count}
+                  onClick={() => setPicked(new Set(p.items.map((_, i) => i)))}
+                >
+                  Выбрать все
+                </Button>
+                <Button variant="ghost" disabled={picked.size === 0} onClick={() => setPicked(new Set())}>
+                  Снять все
+                </Button>
+              </div>
+              <PhoneGallery items={p.items} selected={picked} onChange={setPicked} />
+            </>
           ) : (
             <p>
               Всё уже перенесено: {files(p.already)} лежат на компьютере. Новых снимков на телефоне нет.
@@ -190,8 +217,8 @@ export function PhoneWizard({ open: isOpen, onClose }: { open: boolean; onClose:
       );
       footer =
         p.count > 0 ? (
-          <Button variant="primary" size="lg" onClick={() => void start(p)}>
-            Перенести
+          <Button variant="primary" size="lg" disabled={picked.size === 0} onClick={() => void start(p)}>
+            {picked.size === p.count ? "Перенести всё" : `Перенести выбранные (${picked.size})`}
           </Button>
         ) : (
           <Button variant="primary" onClick={onClose}>
@@ -204,9 +231,9 @@ export function PhoneWizard({ open: isOpen, onClose }: { open: boolean; onClose:
       body = (
         <div className="space-y-4">
           <p className="text-[18px]">
-            Переношу: {stage.files} из {stage.plan.count} ({bytes(stage.bytes)} из {bytes(stage.plan.bytes)})
+            Переношу: {stage.files} из {stage.count} ({bytes(stage.bytes)} из {bytes(stage.total)})
           </p>
-          <ProgressBar value={stage.plan.bytes ? stage.bytes / stage.plan.bytes : 0} />
+          <ProgressBar value={stage.total ? stage.bytes / stage.total : 0} />
           <p className="text-[16px] text-muted">Не отключайте телефон, пока перенос не закончится.</p>
         </div>
       );
@@ -257,7 +284,13 @@ export function PhoneWizard({ open: isOpen, onClose }: { open: boolean; onClose:
   }
 
   return (
-    <Dialog open={isOpen} onOpenChange={(v) => !v && close()} title="Перенести фото с телефона" width={640} footer={footer}>
+    <Dialog
+      open={isOpen}
+      onOpenChange={(v) => !v && close()}
+      title="Перенести фото с телефона"
+      width={stage.kind === "ready" && stage.plan.count > 0 ? 1100 : 640}
+      footer={footer}
+    >
       {body}
     </Dialog>
   );

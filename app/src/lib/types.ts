@@ -278,8 +278,17 @@ export interface PhoneSource {
   name: string;
   kind: "phone" | "card";
 }
+/** Новый файл на телефоне — плитка галереи (номер = индекс в `items`). */
+export interface PhonePlanItem {
+  name: string;
+  size: number;
+  /** «ГГГГ-ММ» или «Без даты». */
+  month: string;
+  video: boolean;
+}
 export interface PhonePlan {
   count: number;
+  items: PhonePlanItem[];
   bytes: number;
   already: number;
   photos: number;

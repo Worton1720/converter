@@ -484,6 +484,99 @@ fn copy_one(item: &ImportItem, cancel: &AtomicBool, progress: impl Fn(u64)) -> R
     result
 }
 
+// ---------- превью для галереи мастера ----------
+
+/// Видео больше этого — без кадра: качать его целиком ради картинки слишком долго.
+const PREVIEW_COPY_LIMIT: u64 = 30 << 20;
+
+/// Файл, по которому можно построить миниатюру (протоколом `thumb://`). Для папки — сам файл;
+/// для адреса KIO — маленький JPEG в кэше миниатюр: у JPEG — встроенная миниатюра из первых
+/// 256 КБ, у остального фото до 30 МБ — копия, ужатая до 320 px и сразу удалённая.
+/// `None` — превью нет (большое видео, телефон не отвечает).
+pub fn preview(location: &Location, size: u64) -> Option<PathBuf> {
+    match location {
+        Location::Path(p) => Some(p.clone()),
+        #[cfg(target_os = "linux")]
+        Location::Kio(url) => kio_preview(url, size),
+        #[cfg(not(target_os = "linux"))]
+        Location::Kio(_) => None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn kio_preview(url: &str, size: u64) -> Option<PathBuf> {
+    use ::image::GenericImageView;
+    let mut key = blake3::Hasher::new();
+    key.update(url.as_bytes());
+    key.update(&size.to_le_bytes());
+    let dir = crate::paths::cache_dir().join("thumbs").join("phone");
+    let out = dir.join(format!("{}.jpg", &key.finalize().to_hex()[..32]));
+    if out.exists() {
+        return Some(out);
+    }
+    std::fs::create_dir_all(&dir).ok()?;
+    let ext = Path::new(url)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    if matches!(ext.as_str(), "jpg" | "jpeg")
+        && let Some(head) = kio::head(url, 256 << 10)
+        && let Some(thumb) = jpeg_exif(&head)
+            .and_then(crate::exif::normalize)
+            .and_then(|tiff| crate::exif::thumbnail(&tiff).map(<[u8]>::to_vec))
+    {
+        std::fs::write(&out, thumb).ok()?;
+        return Some(out);
+    }
+    let video = ["mov", "mp4", "m4v", "3gp", "avi", "mkv"].contains(&ext.as_str());
+    if video || size > PREVIEW_COPY_LIMIT {
+        return None;
+    }
+    let tmp = dir.join(format!(".{}.{ext}", out.file_stem()?.to_string_lossy()));
+    kio::copy(url, &tmp, size, &AtomicBool::new(false)).ok()?;
+    let img = match crate::media::detect(&tmp) {
+        Some(crate::media::MediaKind::Image(kind)) => crate::thumb::preview(&tmp, kind, 320).ok(),
+        _ => None,
+    };
+    let _ = std::fs::remove_file(&tmp);
+    let img = img?;
+    let small = if img.dimensions().0.max(img.dimensions().1) > 320 {
+        img.thumbnail(320, 320)
+    } else {
+        img
+    };
+    small
+        .to_rgb8()
+        .save_with_format(&out, ::image::ImageFormat::Jpeg)
+        .ok()?;
+    Some(out)
+}
+
+/// Сегмент EXIF (APP1 «Exif\0\0…») из начала JPEG — без чтения всего файла.
+fn jpeg_exif(head: &[u8]) -> Option<&[u8]> {
+    if !head.starts_with(&[0xFF, 0xD8]) {
+        return None;
+    }
+    let mut at = 2;
+    while at + 4 <= head.len() {
+        if head[at] != 0xFF {
+            return None;
+        }
+        let marker = head[at + 1];
+        if marker == 0xDA || marker == 0xD9 {
+            return None; // начались данные картинки
+        }
+        let len = usize::from(u16::from_be_bytes([head[at + 2], head[at + 3]]));
+        let body = head.get(at + 4..at + 2 + len)?;
+        if marker == 0xE1 && body.starts_with(b"Exif\0\0") {
+            return Some(body);
+        }
+        at += 2 + len;
+    }
+    None
+}
+
 // ---------- Android на KDE: KIO через kioclient ----------
 
 #[cfg(target_os = "linux")]
@@ -664,6 +757,36 @@ mod kio {
         Ok(())
     }
 
+    /// Первые `limit` байт файла с телефона (`kioclient cat`, затем процесс прерывается).
+    pub(super) fn head(url: &str, limit: usize) -> Option<Vec<u8>> {
+        let mut child = std::process::Command::new("kioclient")
+            .args(["--noninteractive", "--platform", "offscreen", "cat", url])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        let mut out = child.stdout.take()?;
+        let reader = std::thread::spawn(move || {
+            let mut buf = Vec::with_capacity(limit);
+            let mut chunk = [0u8; 64 << 10];
+            while buf.len() < limit {
+                match out.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                }
+            }
+            buf.truncate(limit);
+            buf
+        });
+        let start = Instant::now();
+        while !reader.is_finished() && start.elapsed() < Duration::from_secs(30) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        reader.join().ok().filter(|b| !b.is_empty())
+    }
+
     /// Копия с телефона в `tmp`. KIO сохраняет время изменения. Предел времени — по размеру
     /// (MTP не медленнее ~2 МБ/с), не меньше двух минут.
     pub(super) fn copy(url: &str, tmp: &Path, size: u64, cancel: &AtomicBool) -> Result<()> {
@@ -786,6 +909,17 @@ mod tests {
             kio::child("mtp:/Redmi/Внутренний общий накопитель/", "50% #1?.jpg"),
             "mtp:/Redmi/Внутренний общий накопитель/50%25 %231%3F.jpg"
         );
+    }
+
+    #[test]
+    fn finds_exif_segment_in_jpeg_head() {
+        let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0, 4, 1, 2];
+        jpeg.extend_from_slice(&[0xFF, 0xE1, 0, 10]);
+        jpeg.extend_from_slice(b"Exif\0\0II");
+        jpeg.extend_from_slice(&[0xFF, 0xDA, 0, 2]);
+        assert_eq!(jpeg_exif(&jpeg), Some(&b"Exif\0\0II"[..]));
+        assert_eq!(jpeg_exif(&jpeg[..10]), None, "обрезано до APP1");
+        assert_eq!(jpeg_exif(b"PNG"), None);
     }
 
     #[cfg(target_os = "linux")]

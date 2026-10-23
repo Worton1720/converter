@@ -203,13 +203,27 @@
     expect(dialog().innerText.includes("Тестовый телефон"), "нет имени телефона");
     expect(dialog().innerText.includes("2 фото"), `не то число файлов: ${dialog().innerText}`);
     expect(dialog().innerText.includes("С телефона ничего не удалится"), "нет обещания не удалять");
-    checkElderlyRules("мастер: план");
-    await press("Перенести");
-    await until(() => text().includes("Перенесено 2 файла"), () => `итог переноса; на экране: ${dialog()?.innerText}`, 60000);
+    checkElderlyRules("мастер: галерея");
+    expect(text().includes("Выбрано 2 из 2"), "по умолчанию выбрано не всё");
+    expect(button("Выбрать весь месяц") || button("Снять весь месяц"), "нет выбора месяца");
+    // Снять один снимок нажатием — переносится только выбранное.
+    const tiles = () => [...dialog().querySelectorAll("[role=button][aria-pressed]")];
+    tiles()[0].click();
+    await until(() => text().includes("Выбрано 1 из 2"), "«Выбрано 1 из 2»");
+    await press("Перенести выбранные (1)");
+    await until(() => text().includes("Перенесено 1 файл"), () => `итог переноса; на экране: ${dialog()?.innerText}`, 60000);
     checkElderlyRules("мастер: итог");
-    // Повторно — уже всё перенесено.
     await press("Готово");
     await until(() => !dialog(), "мастер закрыт");
+    // Второй раз — остался один новый снимок, он и переносится.
+    await click("Перенести с телефона");
+    await until(() => text().includes("Выбрано 1 из 1"), "второй раз: «Выбрано 1 из 1»");
+    expect(text().includes("Ещё 1 файл уже перенесено раньше"), `нет упоминания перенесённого: ${dialog()?.innerText}`);
+    await press("Перенести всё");
+    await until(() => text().includes("Перенесено 1 файл"), "второй перенос", 60000);
+    await press("Готово");
+    await until(() => !dialog(), "мастер закрыт");
+    // Третий раз — всё уже перенесено.
     await click("Перенести с телефона");
     await until(() => text().includes("Всё уже перенесено"), "повтор: «Всё уже перенесено»");
     await press("Готово");

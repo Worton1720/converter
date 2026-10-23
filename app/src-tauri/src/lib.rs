@@ -1049,6 +1049,7 @@ pub fn run() {
             phone::phone_sources,
             phone::phone_plan,
             phone::phone_import,
+            phone::phone_preview,
             phone::phone_cancel,
             update::check_update,
             update::install_update,

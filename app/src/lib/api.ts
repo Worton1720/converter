@@ -49,7 +49,8 @@ export const api = {
 
   phoneSources: () => invoke<PhoneSource[]>("phone_sources"),
   phonePlan: (index: number, dest: string) => invoke<PhonePlan>("phone_plan", { index, dest }),
-  phoneImport: () => invoke<PhoneReport>("phone_import"),
+  phoneImport: (selected: number[]) => invoke<PhoneReport>("phone_import", { selected }),
+  phonePreview: (index: number) => invoke<string | null>("phone_preview", { index }),
   phoneCancel: () => invoke<void>("phone_cancel"),
   historyList: () => invoke<HistoryItem[]>("history_list"),
   historyUndo: (id: number) => invoke<UndoReport>("history_undo", { id }),

@@ -17,6 +17,8 @@ pub struct PhoneState {
     sources: Mutex<Vec<Source>>,
     plan: Mutex<Option<ImportPlan>>,
     cancel: Mutex<Option<Arc<AtomicBool>>>,
+    /// Сколько превью строится сейчас.
+    preview_gate: (Mutex<usize>, std::sync::Condvar),
 }
 
 impl PhoneState {
@@ -43,6 +45,16 @@ pub struct SourceDto {
     kind: &'static str,
 }
 
+/// Файл в галерее мастера; номер — индекс в плане (по нему превью и выбор).
+#[derive(Serialize)]
+pub struct PlanItemDto {
+    name: String,
+    size: u64,
+    /// «ГГГГ-ММ» или «Без даты» — папка, куда он ляжет.
+    month: String,
+    video: bool,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanDto {
@@ -51,6 +63,7 @@ pub struct PlanDto {
     already: usize,
     photos: usize,
     videos: usize,
+    items: Vec<PlanItemDto>,
 }
 
 #[derive(Serialize)]
@@ -116,13 +129,35 @@ pub async fn phone_plan(index: usize, dest: String, app: AppHandle) -> Result<Pl
         });
         phone.end();
         let plan = result.map_err(|e| e.to_string())?;
-        let videos = plan.items.iter().filter(|i| is_video(&i.dest)).count();
+        let items: Vec<PlanItemDto> = plan
+            .items
+            .iter()
+            .map(|i| PlanItemDto {
+                name: i
+                    .dest
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+                size: i.size,
+                month: i
+                    .dest
+                    .parent()
+                    .and_then(|m| m.file_name())
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+                video: is_video(&i.dest),
+            })
+            .collect();
+        let videos = items.iter().filter(|i| i.video).count();
         let dto = PlanDto {
             count: plan.items.len(),
             bytes: plan.bytes,
             already: plan.already,
             photos: plan.items.len() - videos,
             videos,
+            items,
         };
         *phone.plan.lock().unwrap() = Some(plan);
         Ok(dto)
@@ -131,17 +166,52 @@ pub async fn phone_plan(index: usize, dest: String, app: AppHandle) -> Result<Pl
     .map_err(|e| e.to_string())?
 }
 
-/// Перенос по последнему плану. Прогресс — `phone:progress` не чаще 10 раз в секунду.
+/// Превью файла `index` из плана — путь для `thumb://` (`None` — показать значок).
+/// Не больше четырёх одновременно: каждое — запуск `kioclient`.
 #[tauri::command]
-pub async fn phone_import(app: AppHandle) -> Result<ReportDto, String> {
+pub async fn phone_preview(index: usize, app: AppHandle) -> Option<String> {
     tauri::async_runtime::spawn_blocking(move || {
         let phone = app.state::<PhoneState>();
-        let plan = phone
+        let (location, size) = {
+            let plan = phone.plan.lock().unwrap();
+            let item = plan.as_ref()?.items.get(index)?;
+            (item.source.clone(), item.size)
+        };
+        let (lock, cvar) = &phone.preview_gate;
+        let mut running = cvar.wait_while(lock.lock().unwrap(), |n| *n >= 4).unwrap();
+        *running += 1;
+        drop(running);
+        let path = import::preview(&location, size);
+        *lock.lock().unwrap() -= 1;
+        cvar.notify_one();
+        path.map(|p| p.to_string_lossy().into_owned())
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Перенос выбранных файлов последнего плана (`selected` — номера в нём).
+/// Прогресс — `phone:progress` не чаще 10 раз в секунду.
+#[tauri::command]
+pub async fn phone_import(selected: Vec<usize>, app: AppHandle) -> Result<ReportDto, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let phone = app.state::<PhoneState>();
+        let mut plan = phone
             .plan
             .lock()
             .unwrap()
-            .take()
+            .clone()
             .ok_or("сначала найдите, что перенести")?;
+        let keep: std::collections::HashSet<usize> = selected.into_iter().collect();
+        plan.items = plan
+            .items
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| keep.contains(i))
+            .map(|(_, item)| item)
+            .collect();
+        plan.bytes = plan.items.iter().map(|i| i.size).sum();
         let cancel = phone.begin().ok_or("уже идёт перенос")?;
         let state = app.state::<AppState>();
         state.phone_busy.store(true, Ordering::Relaxed);
