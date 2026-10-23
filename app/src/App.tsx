@@ -12,6 +12,7 @@ import { checkForUpdate } from "./lib/update";
 import type { EngineEvent, GovernorStatus, Item } from "./lib/types";
 import { addPaths, ConvertView } from "./views/convert/ConvertView";
 import { DupesView } from "./views/dupes/DupesView";
+import { HistoryView } from "./views/HistoryView";
 import { LogView } from "./views/LogView";
 
 function useTheme() {
@@ -100,7 +101,13 @@ export default function App() {
         <Header onSettings={() => setSettingsOpen(true)} />
         <UpdateBanner />
         <main className="flex min-h-0 flex-1">
-          {!ready ? null : tab === "convert" ? <ConvertView /> : tab === "dupes" ? <DupesView /> : <LogView />}
+          {!ready ? null : tab === "convert" ? <ConvertView /> : tab === "dupes" ? (
+            <DupesView />
+          ) : tab === "history" ? (
+            <HistoryView />
+          ) : (
+            <LogView />
+          )}
         </main>
       </div>
 

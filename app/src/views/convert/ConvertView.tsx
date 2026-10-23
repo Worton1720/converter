@@ -6,7 +6,7 @@ import { Button, Dialog, ProgressBar, Step } from "../../components/ui";
 import { api } from "../../lib/api";
 import { basename, bytes, dirname, etaWords, files, mediaCount, plainError } from "../../lib/format";
 import { useStore } from "../../lib/store";
-import type { ConvertOptions, SpaceCheck, SpaceEstimate } from "../../lib/types";
+import type { ConvertOptions, Interrupted, SpaceCheck, SpaceEstimate } from "../../lib/types";
 import { FileGrid } from "./FileGrid";
 import { FileTable } from "./FileTable";
 import { OptionsPanel } from "./OptionsPanel";
@@ -71,6 +71,46 @@ function EmptyState() {
   );
 }
 
+/** После сбоя: «В прошлый раз программа закрылась посреди работы» — доделать одной кнопкой.
+ *  Уже готовые результаты пропускаются, а параметры того запуска не становятся настройками. */
+function ResumeBanner() {
+  const [info, setInfo] = useState<Interrupted | null>(null);
+  const runActive = useStore((s) => s.run.active);
+  const startRun = useStore((s) => s.startRun);
+  const addLog = useStore((s) => s.addLog);
+  useEffect(() => {
+    api.historyInterrupted().then(setInfo, () => setInfo(null));
+  }, []);
+  if (!info || runActive) return null;
+
+  const resume = async () => {
+    setInfo(null);
+    try {
+      const options = await api.historyResume(info.id);
+      await api.addPaths(info.pending);
+      startRun(info.pending);
+      await api.startConvert(options, info.pending, false);
+    } catch (e) {
+      addLog("Error", `Не удалось доделать: ${e}`);
+      useStore.setState((s) => ({ run: { ...s.run, active: false } }));
+    }
+  };
+  return (
+    <div className="flex flex-wrap items-center gap-3 border-b border-line bg-warn-soft px-6 py-3">
+      <p className="min-w-0 flex-1 text-[16px] leading-relaxed">
+        В прошлый раз программа закрылась посреди работы. Готово {files(info.done)}, осталось{" "}
+        {files(info.pending.length)}.
+      </p>
+      <Button variant="primary" onClick={() => void resume()}>
+        Доделать
+      </Button>
+      <Button variant="ghost" onClick={() => void api.historyDismiss(info.id).then(() => setInfo(null))}>
+        Не надо
+      </Button>
+    </div>
+  );
+}
+
 export function ConvertView() {
   const order = useStore((s) => s.order);
   const rows = useStore((s) => s.rows);
@@ -91,6 +131,7 @@ export function ConvertView() {
   return (
     <div className="flex min-h-0 flex-1">
       <section className="flex min-w-0 flex-1 flex-col">
+        <ResumeBanner />
         <div className="space-y-4 border-b border-line px-6 py-5">
           <Step n={1} title="Выберите фото и видео">
             {order.length > 0 && (

@@ -1,5 +1,6 @@
 //! Tauri-оболочка над `converter-core`: команды для интерфейса и события прогресса.
 
+mod devtest;
 mod dto;
 mod update;
 
@@ -11,10 +12,11 @@ use std::time::{Duration, Instant};
 
 use converter_core::dupes::{self, DupAction, DupesOptions, DupesReport, KeepRule};
 use converter_core::engine::{self, Engine, RunHandle, SpaceCheck};
-use converter_core::events::Event;
+use converter_core::events::{Event, JobOutcome};
 use converter_core::ffmpeg::Tools;
 use converter_core::fs_ops;
 use converter_core::governor::{Governor, LoadLevel};
+use converter_core::history::{self, Change, Fate, History};
 use converter_core::hw::{self, HwCaps};
 use converter_core::logfile::LogFile;
 use converter_core::media::{self, ImageKind};
@@ -40,6 +42,21 @@ struct ActiveRun {
     handle: RunHandle,
     /// Путь → id задачи для отмены отдельных файлов.
     ids: Vec<PathBuf>,
+    /// Запись истории этого запуска.
+    history_id: u64,
+}
+
+impl AppState {
+    /// Изменить запись истории и сохранить файл (не чаще, чем просит вызывающий).
+    fn with_history(&self, id: u64, save: bool, f: impl FnOnce(&mut history::Entry)) {
+        let mut h = self.history.lock().unwrap();
+        if let Some(e) = h.get_mut(id) {
+            f(e);
+        }
+        if save {
+            h.save();
+        }
+    }
 }
 
 #[derive(Default)]
@@ -57,6 +74,8 @@ struct AppState {
     run: Mutex<Option<ActiveRun>>,
     dupes: Mutex<DupesState>,
     settings: Mutex<Settings>,
+    /// История действий — для «Истории», «Вернуть как было» и продолжения после сбоя.
+    history: Mutex<History>,
     awake: Mutex<Option<keepawake::KeepAwake>>,
     allow_close: AtomicBool,
     startup_paths: Mutex<Vec<String>>,
@@ -346,6 +365,7 @@ fn space_estimate(
 fn start_convert(
     options: ConvertOptions,
     paths: Vec<String>,
+    remember: Option<bool>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> CmdResult<()> {
@@ -359,31 +379,89 @@ fn start_convert(
         return Err("нет файлов для конвертации".into());
     }
     let ids = items.iter().map(|i| i.path.clone()).collect();
-    {
+    // «Доделать после сбоя» запускается со своими параметрами — они не должны стать настройками.
+    if remember.unwrap_or(true) {
         let mut settings = state.settings.lock().unwrap();
         settings.convert = options.clone();
         let _ = settings.save();
     }
+    let entry = history::Entry::convert(
+        options.clone(),
+        items.iter().map(|i| i.path.clone()).collect(),
+    );
+    let history_id = entry.id;
+    {
+        let mut h = state.history.lock().unwrap();
+        h.push(entry);
+        h.save();
+    }
     let handle = engine.convert(items, options);
     let events = handle.events.clone();
-    *run = Some(ActiveRun { handle, ids });
+    *run = Some(ActiveRun {
+        handle,
+        ids,
+        history_id,
+    });
     drop(run);
     state.update_awake();
-    std::thread::spawn(move || forward_events(app, events));
+    std::thread::spawn(move || forward_events(app, events, history_id));
     Ok(())
 }
 
 /// Пачки событий раз в 100 мс: интерфейс не захлёбывается на тысячах файлов.
-fn forward_events(app: AppHandle, events: crossbeam_channel::Receiver<Event>) {
-    let log = &app.state::<AppState>().log;
+/// История: результат файла. Сохраняется не чаще раза в 2 с — при сбое теряется не больше.
+fn record_finished(
+    state: &AppState,
+    history_id: u64,
+    source: &Path,
+    outcome: &JobOutcome,
+    save: bool,
+) {
+    state.with_history(history_id, save, |e| match outcome {
+        JobOutcome::Done {
+            output,
+            source: action,
+            ..
+        } => e.file_done(
+            source,
+            Some(Change {
+                source: source.to_path_buf(),
+                output: Some(output.clone()),
+                fate: Fate::from(action),
+            }),
+            false,
+            false,
+        ),
+        JobOutcome::Skipped { .. } => e.file_done(source, None, true, false),
+        JobOutcome::Failed { .. } => e.file_done(source, None, false, true),
+        // Отменённые остаются в списке «не сделано».
+        JobOutcome::Cancelled => {}
+    });
+}
+
+fn forward_events(app: AppHandle, events: crossbeam_channel::Receiver<Event>, history_id: u64) {
+    let state = app.state::<AppState>();
+    let log = &state.log;
     let mut batch: Vec<Event> = Vec::new();
     let mut last = Instant::now();
+    let mut last_save = Instant::now();
     let mut summary = None;
     loop {
         match events.recv_timeout(Duration::from_millis(100)) {
             Ok(e) => {
                 log.event(&e);
+                if let Event::JobFinished {
+                    source, outcome, ..
+                } = &e
+                {
+                    let save = last_save.elapsed() >= Duration::from_secs(2);
+                    if save {
+                        last_save = Instant::now();
+                    }
+                    record_finished(&state, history_id, source, outcome, save);
+                }
                 if let Event::RunFinished(s) = &e {
+                    state.with_history(history_id, true, history::Entry::finish);
                     summary = Some(s.clone());
                 }
                 batch.push(e);
@@ -403,7 +481,6 @@ fn forward_events(app: AppHandle, events: crossbeam_channel::Receiver<Event>) {
     if !batch.is_empty() {
         let _ = app.emit("convert:events", batch);
     }
-    let state = app.state::<AppState>();
     if let Some(run) = state.run.lock().unwrap().take() {
         run.handle.join();
     }
@@ -549,6 +626,7 @@ async fn dupes_apply(
         let mut d = state.dupes.lock().unwrap();
         let report = d.report.as_mut().ok_or("сначала найдите дубликаты")?;
         let results = dupes::apply(&report.groups, &marks, &action).map_err(err)?;
+        record_dupes(&state, &report.groups, &results, &action);
         // Убираем из отчёта обработанные файлы и группы, где остался один файл.
         let done: HashSet<&Path> = results
             .iter()
@@ -563,6 +641,146 @@ async fn dupes_apply(
     })
     .await
     .map_err(err)?
+}
+
+/// История: что стало с убранными копиями (в корзину, удалены, куда перемещены).
+fn record_dupes(
+    state: &AppState,
+    groups: &[dupes::DupGroup],
+    results: &[dupes::ActionResult],
+    action: &DupAction,
+) {
+    let ok: Vec<&dupes::ActionResult> = results.iter().filter(|r| r.error.is_none()).collect();
+    if ok.is_empty() {
+        return;
+    }
+    let done: HashSet<&Path> = ok.iter().map(|r| r.path.as_path()).collect();
+    let freed = groups
+        .iter()
+        .flat_map(|g| &g.files)
+        .filter(|f| done.contains(f.path.as_path()))
+        .map(|f| f.size)
+        .sum();
+    let changes = ok
+        .iter()
+        .map(|r| Change {
+            source: r.path.clone(),
+            output: None,
+            fate: match action {
+                DupAction::Trash => Fate::Trashed,
+                DupAction::Delete => Fate::Deleted,
+                DupAction::MoveTo(_) => Fate::MovedTo(r.moved_to.clone().unwrap_or_default()),
+            },
+        })
+        .collect();
+    let now = history::now_ms();
+    let mut h = state.history.lock().unwrap();
+    h.push(history::Entry {
+        id: now,
+        finished_ms: Some(now),
+        action: history::Action::Dupes { freed },
+        changes,
+        undone: false,
+    });
+    h.save();
+}
+
+#[tauri::command]
+fn history_list(state: State<'_, AppState>) -> Vec<dto::HistoryItem> {
+    let h = state.history.lock().unwrap();
+    h.entries.iter().rev().map(dto::HistoryItem::new).collect()
+}
+
+/// «Вернуть как было» по записи истории. Запись помечается отменённой, если что-то вернулось.
+#[tauri::command]
+async fn history_undo(id: u64, app: AppHandle) -> CmdResult<history::UndoReport> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        if state.busy() {
+            return Err("дождитесь окончания работы".to_string());
+        }
+        let entry = state
+            .history
+            .lock()
+            .unwrap()
+            .entries
+            .iter()
+            .find(|e| e.id == id)
+            .cloned()
+            .ok_or("запись не найдена")?;
+        if entry.undone {
+            return Err("уже отменено".into());
+        }
+        let report = history::undo(&entry);
+        state.log.write(
+            "INFO",
+            &format!(
+                "вернуть как было: возвращено {}, убрано результатов {}, не получилось {}",
+                report.restored,
+                report.removed,
+                report.problems.len()
+            ),
+        );
+        for (path, problem) in &report.problems {
+            state
+                .log
+                .write("WARN", &format!("{}: {problem}", path.display()));
+        }
+        if report.restored + report.removed > 0 {
+            state.with_history(id, true, |e| e.undone = true);
+        }
+        Ok(report)
+    })
+    .await
+    .map_err(err)?
+}
+
+/// Незаконченное преобразование: программа закрылась посреди работы (FR план, п. 7).
+#[tauri::command]
+fn history_interrupted(state: State<'_, AppState>) -> Option<dto::Interrupted> {
+    let active = state.run.lock().unwrap().as_ref().map(|r| r.history_id);
+    let h = state.history.lock().unwrap();
+    let e = h
+        .entries
+        .iter()
+        .rev()
+        .find(|e| e.finished_ms.is_none() && Some(e.id) != active)?;
+    let history::Action::Convert { pending, .. } = &e.action else {
+        return None;
+    };
+    let pending: Vec<String> = pending
+        .iter()
+        .filter(|p| p.exists())
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    let done = e.changes.len();
+    (!pending.is_empty()).then_some(dto::Interrupted {
+        id: e.id,
+        pending,
+        done,
+    })
+}
+
+/// «Доделать»: параметры того запуска; уже готовые результаты пропускаются — история
+/// сохраняется не чаще раза в 2 с, и последние сделанные файлы могли остаться в списке.
+#[tauri::command]
+fn history_resume(id: u64, state: State<'_, AppState>) -> CmdResult<ConvertOptions> {
+    let mut h = state.history.lock().unwrap();
+    let e = h.get_mut(id).ok_or("запись не найдена")?;
+    let history::Action::Convert { options, .. } = &e.action else {
+        return Err("это не преобразование".into());
+    };
+    let mut options = options.clone();
+    options.conflict = converter_core::options::ConflictPolicy::Skip;
+    e.finish();
+    h.save();
+    Ok(options)
+}
+
+/// «Не надо»: больше не предлагать доделать.
+#[tauri::command]
+fn history_dismiss(id: u64, state: State<'_, AppState>) {
+    state.with_history(id, true, history::Entry::finish);
 }
 
 #[tauri::command]
@@ -676,6 +894,7 @@ fn existing_paths(args: impl IntoIterator<Item = String>) -> Vec<String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let args = devtest::take_args(std::env::args().skip(1).collect());
     let removed = fs_ops::cleanup_stale_temps();
     let settings = Settings::load();
     let governor = Governor::start(settings.load, 0);
@@ -689,9 +908,10 @@ pub fn run() {
         run: Mutex::new(None),
         dupes: Mutex::new(DupesState::default()),
         settings: Mutex::new(settings),
+        history: Mutex::new(History::load()),
         awake: Mutex::new(None),
         allow_close: AtomicBool::new(false),
-        startup_paths: Mutex::new(existing_paths(std::env::args().skip(1))),
+        startup_paths: Mutex::new(existing_paths(args)),
         ffmpeg_dirs: Mutex::new(Vec::new()),
         thumb_gate: (Mutex::new(0), Condvar::new()),
     };
@@ -706,8 +926,12 @@ pub fn run() {
         &format!("запуск Converter {}", env!("CARGO_PKG_VERSION")),
     );
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+    let builder = tauri::Builder::default();
+    // В автотесте — свой экземпляр, даже если программа уже открыта у пользователя.
+    let builder = if devtest::active() {
+        builder
+    } else {
+        builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             // Только для отладки: `converter-app --dev-eval "<js>"` выполняет код в окне,
             // чтобы проверять интерфейс без ручных кликов.
             #[cfg(debug_assertions)]
@@ -726,6 +950,8 @@ pub fn run() {
                 let _ = w.set_focus();
             }
         }))
+    };
+    builder
         // Размер, положение и «развёрнуто» окна между запусками (FR-13.5).
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
@@ -734,6 +960,13 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(state)
         .manage(update::UpdateState::default())
+        .on_page_load(|webview, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Finished
+                && let Some(script) = devtest::script_once()
+            {
+                let _ = webview.eval(&script);
+            }
+        })
         .setup(|app| {
             // Встроенный ffmpeg лежит в ресурсах приложения (AppImage, установщик Windows).
             let state = app.state::<AppState>();
@@ -801,8 +1034,15 @@ pub fn run() {
             clear_thumb_cache,
             write_text_file,
             quit,
+            history_list,
+            history_undo,
+            history_interrupted,
+            history_resume,
+            history_dismiss,
             update::check_update,
             update::install_update,
+            devtest::dev_report,
+            devtest::dev_exit,
         ])
         .run(tauri::generate_context!())
         .expect("ошибка запуска приложения");

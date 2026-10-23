@@ -23,6 +23,7 @@ import type {
   Similarity,
 } from "../../lib/types";
 import { Thumb } from "../convert/FileTable";
+import { canUndo, undoEntry } from "../HistoryView";
 import { CompareDialog } from "./Compare";
 
 type FlatRow = { type: "group"; g: number } | { type: "file"; g: number; f: number };
@@ -142,6 +143,20 @@ async function findDuplicates() {
       running: false,
       notice: msg.includes("отменено") ? "Поиск остановлен." : `Поиск не удался: ${msg}`,
     }));
+  }
+}
+
+/** «Вернуть как было» сразу после уборки: последняя запись истории об одинаковых файлах.
+ *  Найденные группы после этого устарели — нужно искать заново. */
+async function undoLastCleanup() {
+  const setDupes = useStore.getState().setDupes;
+  try {
+    const last = (await api.historyList()).find((h) => h.kind === "dupes");
+    if (!last || !canUndo(last)) return;
+    const text = await undoEntry(last.id);
+    setDupes((d) => ({ ...d, result: null, marks: [], focus: null, notice: text }));
+  } catch (e) {
+    setDupes((d) => ({ ...d, notice: `Не получилось вернуть: ${e}` }));
   }
 }
 
@@ -334,7 +349,12 @@ function Simple({ onReview }: { onReview: (kind?: GroupKind) => void }) {
           <section className="space-y-4">
             <Step n={3} title="Результат" />
             {dupes.notice && (
-              <p className="rounded-lg bg-accent-soft px-4 py-3 text-[16px] leading-relaxed">{dupes.notice}</p>
+              <div className="space-y-3 rounded-lg bg-accent-soft px-4 py-3">
+                <p className="text-[16px] leading-relaxed">{dupes.notice}</p>
+                {dupes.notice.startsWith("Убрано в корзину") && (
+                  <Button onClick={() => void undoLastCleanup()}>Вернуть как было</Button>
+                )}
+              </div>
             )}
             {groups > 0 && (
               <div className="space-y-5">

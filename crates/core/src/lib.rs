@@ -11,6 +11,7 @@ pub mod exif;
 pub mod ffmpeg;
 pub mod fs_ops;
 pub mod governor;
+pub mod history;
 pub mod hw;
 pub mod logfile;
 pub mod media;

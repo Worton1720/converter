@@ -241,3 +241,34 @@ export interface UpdateInfo {
   /** Как установлена программа; `null` — переносная версия, обновляется вручную. */
   installer: "appimage" | "deb" | "nsis" | null;
 }
+
+/** Строка «Истории» (`dto::HistoryItem`). */
+export interface HistoryItem {
+  id: number;
+  finishedMs: number | null;
+  kind: "convert" | "dupes";
+  done: number;
+  skipped: number;
+  failed: number;
+  pending: number;
+  freed: number;
+  trashed: number;
+  deleted: number;
+  moved: number;
+  outputDirs: string[];
+  undone: boolean;
+}
+
+/** Итог «Вернуть как было» (`history::UndoReport`). */
+export interface UndoReport {
+  restored: number;
+  removed: number;
+  problems: [string, string][];
+}
+
+/** Незаконченное преобразование после сбоя (`dto::Interrupted`). */
+export interface Interrupted {
+  id: number;
+  pending: string[];
+  done: number;
+}

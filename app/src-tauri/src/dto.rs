@@ -5,6 +5,7 @@ use serde::Serialize;
 
 use converter_core::dupes::{self, DupesReport, GroupKind, KeepRule};
 use converter_core::governor::GovernorStatus;
+use converter_core::history;
 use converter_core::media::{ImageKind, MediaKind};
 use converter_core::scan::{LivePhoto, MediaItem};
 use converter_core::settings::Settings;
@@ -212,4 +213,76 @@ impl DupesResult {
                 .collect(),
         }
     }
+}
+
+/// Строка «Истории»: итог действия без подробностей по каждому файлу.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryItem {
+    pub id: u64,
+    pub finished_ms: Option<u64>,
+    /// `convert` или `dupes`.
+    pub kind: &'static str,
+    /// Сделано файлов (преобразовано или убрано).
+    pub done: usize,
+    pub skipped: usize,
+    pub failed: usize,
+    /// Не сделано: программа закрылась посреди работы.
+    pub pending: usize,
+    pub freed: u64,
+    pub trashed: usize,
+    pub deleted: usize,
+    pub moved: usize,
+    /// Папки с результатами (до трёх) — для кнопки «Открыть папку».
+    pub output_dirs: Vec<String>,
+    pub undone: bool,
+}
+
+impl HistoryItem {
+    pub fn new(e: &history::Entry) -> Self {
+        let count = |f: fn(&history::Fate) -> bool| e.changes.iter().filter(|c| f(&c.fate)).count();
+        let (kind, skipped, failed, pending, freed) = match &e.action {
+            history::Action::Convert {
+                pending,
+                skipped,
+                failed,
+                ..
+            } => ("convert", *skipped, *failed, pending.len(), 0),
+            history::Action::Dupes { freed } => ("dupes", 0, 0, 0, *freed),
+        };
+        let mut output_dirs: Vec<String> = Vec::new();
+        for dir in e
+            .changes
+            .iter()
+            .filter_map(|c| c.output.as_deref()?.parent())
+            .map(|d| d.to_string_lossy().into_owned())
+        {
+            if output_dirs.len() < 3 && !output_dirs.contains(&dir) {
+                output_dirs.push(dir);
+            }
+        }
+        HistoryItem {
+            id: e.id,
+            finished_ms: e.finished_ms,
+            kind,
+            done: e.changes.len(),
+            skipped,
+            failed,
+            pending,
+            freed,
+            trashed: count(|f| *f == history::Fate::Trashed),
+            deleted: count(|f| *f == history::Fate::Deleted),
+            moved: count(|f| matches!(f, history::Fate::MovedTo(_))),
+            output_dirs,
+            undone: e.undone,
+        }
+    }
+}
+
+/// Незаконченное преобразование после сбоя: что осталось сделать.
+#[derive(Serialize)]
+pub struct Interrupted {
+    pub id: u64,
+    pub pending: Vec<String>,
+    pub done: usize,
 }

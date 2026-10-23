@@ -8,18 +8,27 @@ on:
   pull_request:
   workflow_call:
 
+# Новый push в ветку отменяет её прежний прогон: проверять имеет смысл только последнее.
+# В master (вызов из release.yml) ничего не отменяется.
+concurrency:
+  group: ci-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   linux:
+    timeout-minutes: 90
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - name: Системные зависимости
+        timeout-minutes: 15
         run: >
           sudo apt-get update && sudo apt-get install -y pkg-config libheif-dev liblcms2-dev ffmpeg
-          libwebkit2gtk-4.1-dev libsoup-3.0-dev libgtk-3-dev librsvg2-dev
+          libwebkit2gtk-4.1-dev libsoup-3.0-dev libgtk-3-dev librsvg2-dev xvfb dbus-x11
+          libheif-plugin-libde265
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -35,8 +44,16 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      - name: Автотесты интерфейса (правила ТЗ 8.5, сценарии 1–3)
+        run: dbus-run-session -- tools/ui-test.sh
+      - name: Итог автотестов интерфейса
+        if: failure()
+        run: |
+          cat target/ui-test/result.log target/ui-test/vite.log 2>/dev/null | tail -50
+          tail -30 target/ui-test/state/converter/logs/converter.log 2>/dev/null || true
 
   windows:
+    timeout-minutes: 90
     runs-on: windows-latest
     env:
       # libheif и libde265 под LGPL — поставляем как DLL (раздел 8.4 ТЗ).

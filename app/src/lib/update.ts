@@ -24,8 +24,15 @@ export const useUpdate = create<UpdateState>(() => ({
   dismissed: false,
 }));
 
+let startupChecked = false;
+
 /** Проверка обновления. При запуске (`manual = false`) ошибки сети не показываются. */
 export async function checkForUpdate(manual: boolean) {
+  // Эффекты в режиме разработки срабатывают дважды — при запуске проверяем один раз.
+  if (!manual) {
+    if (startupChecked) return;
+    startupChecked = true;
+  }
   if (manual) useUpdate.setState({ checkResult: "checking", dismissed: false });
   try {
     const info = await api.checkUpdate();
