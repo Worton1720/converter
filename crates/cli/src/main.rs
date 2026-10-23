@@ -45,6 +45,8 @@ enum Command {
     Convert(ConvertArgs),
     /// Найти дубликаты
     Dupes(DupesArgs),
+    /// Перенести фото и видео с телефона или карты памяти (без --to — список устройств)
+    Phone(PhoneArgs),
     /// Показать ffmpeg и найденные аппаратные кодировщики
     Hw {
         /// Перепроверить, не используя кэш
@@ -287,6 +289,19 @@ enum ActionArg {
 }
 
 #[derive(Args)]
+struct PhoneArgs {
+    /// Куда перенести: внутри появятся папки «ГГГГ-ММ»
+    #[arg(long)]
+    to: Option<PathBuf>,
+    /// Номер устройства из списка (по умолчанию — первое)
+    #[arg(long, default_value_t = 1)]
+    device: usize,
+    /// Только показать, что будет перенесено
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Args)]
 struct DupesArgs {
     #[arg(required = true)]
     paths: Vec<PathBuf>,
@@ -421,6 +436,7 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Command::Convert(args) => run_convert(args),
         Command::Dupes(args) => run_dupes(args),
+        Command::Phone(args) => run_phone(args),
         Command::Hw { refresh, ffmpeg } => run_hw(refresh, &ffmpeg.ffmpeg),
     };
     match result {
@@ -906,6 +922,73 @@ fn run_dupes(args: DupesArgs) -> anyhow::Result<ExitCode> {
         results.len()
     );
     Ok(if errors.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
+}
+
+fn run_phone(args: PhoneArgs) -> anyhow::Result<ExitCode> {
+    use converter_core::import;
+    let sources = import::find_sources();
+    if sources.is_empty() {
+        println!(
+            "Телефон или карта памяти не найдены. Подключите телефон кабелем, разблокируйте его и \
+             выберите «Передача файлов» (на iPhone — «Доверять этому компьютеру»)."
+        );
+        return Ok(ExitCode::from(2));
+    }
+    for (i, s) in sources.iter().enumerate() {
+        let roots: Vec<String> = s.roots.iter().map(|r| r.display()).collect();
+        println!("{}. {} — {}", i + 1, s.name, roots.join(", "));
+    }
+    let Some(dest) = args.to else {
+        return Ok(ExitCode::SUCCESS);
+    };
+    let source = sources
+        .get(args.device.saturating_sub(1))
+        .ok_or_else(|| anyhow::anyhow!("нет устройства с номером {}", args.device))?;
+    let interrupted = ctrlc_flag();
+    let bar = ProgressBar::new_spinner();
+    bar.enable_steady_tick(Duration::from_millis(120));
+    let plan = import::plan(&source.roots, &dest, &interrupted, |n| {
+        bar.set_message(format!(
+            "Просматриваю {}: найдено {n} фото и видео",
+            source.name
+        ))
+    });
+    bar.finish_and_clear();
+    let plan = plan?;
+    println!(
+        "Новых файлов: {} ({}), уже перенесено раньше: {}.",
+        plan.items.len(),
+        human(plan.bytes),
+        plan.already
+    );
+    if args.dry_run || plan.items.is_empty() {
+        return Ok(ExitCode::SUCCESS);
+    }
+    let bar = ProgressBar::new(plan.bytes);
+    bar.set_style(
+        ProgressStyle::with_template("{bar:40} {bytes}/{total_bytes} {msg}")
+            .unwrap_or_else(|_| ProgressStyle::default_bar()),
+    );
+    let total = plan.items.len();
+    let report = import::run(&plan, &interrupted, |files, bytes| {
+        bar.set_position(bytes);
+        bar.set_message(format!("{files} из {total}"));
+    });
+    bar.finish_and_clear();
+    for (src, e) in &report.failed {
+        eprintln!("  ✗ {}: {e}", src.display());
+    }
+    println!(
+        "Перенесено: {} ({}) в {}. С телефона ничего не удалено.",
+        report.copied,
+        human(report.bytes),
+        dest.display()
+    );
+    Ok(if report.failed.is_empty() {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
