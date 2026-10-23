@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Button, Checkbox } from "../../components/ui";
 import { api } from "../../lib/api";
 import { bytes } from "../../lib/format";
+import { intersects, marqueeStyle, useMarquee } from "../../lib/marquee";
 import type { PhonePlanItem } from "../../lib/types";
 import { Thumb } from "./FileTable";
 
@@ -75,6 +76,23 @@ export function PhoneGallery({
   onChange: (next: Set<number>) => void;
 }) {
   const anchor = useRef<number | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  // Рамка: плитки все в DOM — попадание по их положению на экране.
+  const marquee = useMarquee({
+    area: rootRef,
+    content: rootRef,
+    hits: (r) => {
+      const base = rootRef.current!.getBoundingClientRect();
+      return [...rootRef.current!.querySelectorAll<HTMLElement>("[data-pick]")]
+        .filter((el) => {
+          const b = el.getBoundingClientRect();
+          return intersects(r, b.left - base.left, b.top - base.top, b.width, b.height);
+        })
+        .map((el) => el.dataset.pick!);
+    },
+    selected: () => new Set([...selected].map(String)),
+    apply: (next) => onChange(new Set([...next].map(Number))),
+  });
   // Свежие месяцы сверху, внутри месяца — по имени (у камер оно растёт со временем съёмки).
   const months = useMemo(() => {
     const by = new Map<string, number[]>();
@@ -102,7 +120,8 @@ export function PhoneGallery({
   };
 
   return (
-    <div className="space-y-6">
+    <div ref={rootRef} onPointerDown={marquee.onPointerDown} className="relative space-y-6">
+      {marquee.box && <div style={marqueeStyle(marquee.box)} className="rounded border-2 border-accent bg-accent/15" />}
       {months.map(({ month, idx }) => {
         const all = idx.every((i) => selected.has(i));
         return (
@@ -122,6 +141,7 @@ export function PhoneGallery({
                 return (
                   <div
                     key={i}
+                    data-pick={i}
                     role="button"
                     aria-pressed={on}
                     aria-label={`${it.name}${on ? ", выбрано" : ""}`}

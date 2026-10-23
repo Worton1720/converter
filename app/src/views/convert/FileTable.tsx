@@ -6,6 +6,7 @@ import { useRef } from "react";
 import { Checkbox, IconButton } from "../../components/ui";
 import { api } from "../../lib/api";
 import { basename, bytes, dirname, duration, megapixels, plainError } from "../../lib/format";
+import { intersects, marqueeStyle, useMarquee } from "../../lib/marquee";
 import { useStore, type Row } from "../../lib/store";
 import { useThumb } from "../../lib/thumbs";
 
@@ -90,6 +91,15 @@ export function FileTable({ paths }: { paths: string[] }) {
   const removePaths = useStore((s) => s.removePaths);
   const runActive = useStore((s) => s.run.active);
   const parentRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  // Рамка: строки по 64 px во всю ширину.
+  const marquee = useMarquee({
+    area: parentRef,
+    content: contentRef,
+    hits: (r) => paths.filter((_, i) => intersects(r, 0, i * 64, Number.MAX_SAFE_INTEGER, 64)),
+    selected: () => useStore.getState().selected,
+    apply: (next) => useStore.getState().select([...next], "set"),
+  });
 
   const virtualizer = useVirtualizer({
     count: paths.length,
@@ -123,8 +133,11 @@ export function FileTable({ paths }: { paths: string[] }) {
         <span>Состояние</span>
         <span />
       </div>
-      <div ref={parentRef} className="min-h-0 flex-1 overflow-y-auto">
-        <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
+      <div ref={parentRef} onPointerDown={marquee.onPointerDown} className="min-h-0 flex-1 overflow-y-auto">
+        <div ref={contentRef} style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
+          {marquee.box && (
+            <div style={marqueeStyle(marquee.box)} className="rounded border-2 border-accent bg-accent/15" />
+          )}
           {virtualizer.getVirtualItems().map((v) => {
             const path = paths[v.index];
             const row = rows[path];

@@ -187,6 +187,55 @@
     expect(!starts.some((t) => t.includes("выбранные")), `осталась кнопка про выбранные: ${JSON.stringify(starts)}`);
   });
 
+  await test("выделение рамкой: мышью, Shift — добавить, Ctrl — убрать, Esc — отменить", async () => {
+    store().setTab("convert");
+    await invoke("add_paths", { paths: [`${data}/copies`] });
+    await until(() => store().order.length >= 4, "файлы в списке");
+    store().select([], "set");
+    const tiles = await until(() => {
+      const t = [...document.querySelectorAll("[role=button][aria-pressed]")];
+      return t.length >= 3 && t;
+    }, "три картинки на экране");
+    const name = (t) => t.getAttribute("aria-label").replace(/, выбрано$/, "");
+    const center = (t) => {
+      const r = t.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    };
+    // Протянуть рамку от `from` до `to` (точки на экране) с клавишами.
+    const drag = async (from, to, keys = {}, cancel = false) => {
+      const opts = (p) => ({ bubbles: true, clientX: p.x, clientY: p.y, button: 0, pointerId: 1, ...keys });
+      document.elementFromPoint(from.x, from.y).dispatchEvent(new PointerEvent("pointerdown", opts(from)));
+      for (let k = 1; k <= 5; k++) {
+        const p = { x: from.x + ((to.x - from.x) * k) / 5, y: from.y + ((to.y - from.y) * k) / 5 };
+        window.dispatchEvent(new PointerEvent("pointermove", opts(p)));
+        await sleep(30);
+      }
+      if (cancel) window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+      else window.dispatchEvent(new PointerEvent("pointerup", opts(to)));
+      await sleep(100);
+    };
+    const sel = () => [...store().selected].map((p) => p.split("/").pop()).sort();
+    const [a, b, c] = tiles;
+    const ra = a.getBoundingClientRect();
+    // Рамка от левого верхнего угла первой картинки до середины второй — выбраны обе.
+    await drag({ x: ra.left + 4, y: ra.top + 4 }, center(b));
+    expect(sel().length === 2 && sel().includes(name(a)) && sel().includes(name(b)), `рамка: ${sel()}`);
+    // С Ctrl — снять первую.
+    await drag({ x: ra.left + 4, y: ra.top + 4 }, center(a), { ctrlKey: true });
+    expect(sel().length === 1 && sel()[0] === name(b), `Ctrl: ${sel()}`);
+    // С Shift — добавить третью.
+    const rc = c.getBoundingClientRect();
+    await drag({ x: rc.left + 4, y: rc.top + 4 }, center(c), { shiftKey: true });
+    expect(sel().length === 2 && sel().includes(name(c)), `Shift: ${sel()}`);
+    // Esc посреди рамки — выделение как было.
+    await drag({ x: ra.left + 4, y: ra.top + 4 }, center(c), {}, true);
+    expect(sel().length === 2 && sel().includes(name(b)) && sel().includes(name(c)), `Esc: ${sel()}`);
+    // Рамка не превращается в щелчок: после неё картинка не переключилась.
+    expect(text().includes(`Выбрано 2 из ${store().order.length}`), "полоса выделения не совпадает");
+    store().select([], "set");
+    store().removePaths(store().order.filter((p) => p.includes("/copies/")));
+  });
+
   await test("перенос с телефона: мастер по шагам", async () => {
     store().setTab("convert");
     await click("Перенести с телефона");
@@ -208,10 +257,20 @@
     expect(button("Выбрать весь месяц") || button("Снять весь месяц"), "нет выбора месяца");
     // Снять один снимок нажатием — переносится только выбранное.
     const tiles = () => [...dialog().querySelectorAll("[role=button][aria-pressed]")];
-    tiles()[0].click();
-    await until(() => text().includes("Выбрано 1 из 2"), "«Выбрано 1 из 2»");
+    // Снять первый снимок рамкой с Ctrl.
+    const r0 = tiles()[0].getBoundingClientRect();
+    const o = (x, y) => ({ bubbles: true, clientX: x, clientY: y, button: 0, pointerId: 1, ctrlKey: true });
+    document.elementFromPoint(r0.left + 6, r0.top + 6).dispatchEvent(new PointerEvent("pointerdown", o(r0.left + 6, r0.top + 6)));
+    for (let k = 1; k <= 4; k++) {
+      window.dispatchEvent(new PointerEvent("pointermove", o(r0.left + 6 + k * 15, r0.top + 6 + k * 15)));
+      await sleep(30);
+    }
+    window.dispatchEvent(new PointerEvent("pointerup", o(r0.left + 66, r0.top + 66)));
+    // Сразу после рамки щелчок глушится (отпускание — не щелчок по снимку) — как у человека, пауза.
+    await sleep(100);
+    await until(() => text().includes("Выбрано 1 из 2"), () => `рамка в галерее: ${dialog()?.innerText.slice(0, 200)}`);
     await press("Перенести выбранные (1)");
-    await until(() => text().includes("Перенесено 1 файл"), () => `итог переноса; на экране: ${dialog()?.innerText}`, 60000);
+    await until(() => text().includes("Перенесено 1 файл"), () => `итог переноса; в окне: ${dialog()?.innerHTML.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, 400)}; кнопки: ${[...document.querySelectorAll("button")].map((b) => b.textContent.trim()).filter(Boolean).join("|")}`, 60000);
     checkElderlyRules("мастер: итог");
     await press("Готово");
     await until(() => !dialog(), "мастер закрыт");

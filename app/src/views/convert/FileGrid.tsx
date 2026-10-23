@@ -3,6 +3,7 @@ import clsx from "clsx";
 import { Check } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Checkbox } from "../../components/ui";
+import { intersects, marqueeStyle, useMarquee } from "../../lib/marquee";
 import { useStore, type Row } from "../../lib/store";
 import { Thumb } from "./FileTable";
 
@@ -51,6 +52,7 @@ export function FileGrid({ paths }: { paths: string[] }) {
   const selected = useStore((s) => s.selected);
   const clickSelect = useStore((s) => s.clickSelect);
   const parentRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const [columns, setColumns] = useState(4);
 
   useEffect(() => {
@@ -64,6 +66,17 @@ export function FileGrid({ paths }: { paths: string[] }) {
   }, []);
 
   const lines = Math.ceil(paths.length / columns);
+  // Рамка: попадание по геометрии сетки — плиток вне экрана в DOM нет.
+  const marquee = useMarquee({
+    area: parentRef,
+    content: contentRef,
+    hits: (r) =>
+      paths.filter((_, i) =>
+        intersects(r, (i % columns) * (TILE + GAP), Math.floor(i / columns) * (TILE_HEIGHT + GAP), TILE, TILE_HEIGHT),
+      ),
+    selected: () => useStore.getState().selected,
+    apply: (next) => useStore.getState().select([...next], "set"),
+  });
   const virtualizer = useVirtualizer({
     count: lines,
     getScrollElement: () => parentRef.current,
@@ -72,8 +85,11 @@ export function FileGrid({ paths }: { paths: string[] }) {
   });
 
   return (
-    <div ref={parentRef} className="min-h-0 flex-1 overflow-y-auto px-6 pt-2 pb-6">
-      <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
+    <div ref={parentRef} onPointerDown={marquee.onPointerDown} className="min-h-0 flex-1 overflow-y-auto px-6 pt-2 pb-6">
+      <div ref={contentRef} style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
+        {marquee.box && (
+          <div style={marqueeStyle(marquee.box)} className="rounded border-2 border-accent bg-accent/15" />
+        )}
         {virtualizer.getVirtualItems().map((v) => (
           <div
             key={v.index}
