@@ -66,6 +66,15 @@ pub struct Source {
 /// Пустой список — устройства нет или телефон не разрешил доступ (заблокирован экран,
 /// не выбран режим «Передача файлов», на iPhone не нажато «Доверять»).
 pub fn find_sources() -> Vec<Source> {
+    // Автотесты интерфейса: «телефон» — папка (только отладочная сборка).
+    #[cfg(debug_assertions)]
+    if let Some(dir) = std::env::var_os("CONVERTER_TEST_PHONE") {
+        return vec![Source {
+            name: "Тестовый телефон".into(),
+            kind: SourceKind::Phone,
+            roots: vec![Location::Path(dir.into())],
+        }];
+    }
     let mut found = Vec::new();
     #[cfg(target_os = "linux")]
     {

@@ -1,6 +1,6 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
-import { FilePlus2, FolderOpen, FolderPlus, LayoutGrid, List, Pause, Play, Square } from "lucide-react";
+import { FilePlus2, FolderOpen, FolderPlus, LayoutGrid, List, Pause, Play, Smartphone, Square } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Button, Dialog, ProgressBar, Step } from "../../components/ui";
 import { api } from "../../lib/api";
@@ -8,6 +8,7 @@ import { basename, bytes, dirname, etaWords, files, mediaCount, plainError } fro
 import { useStore } from "../../lib/store";
 import type { ConvertOptions, Interrupted, SpaceCheck, SpaceEstimate } from "../../lib/types";
 import { FileGrid } from "./FileGrid";
+import { PhoneWizard } from "./PhoneWizard";
 import { FileTable } from "./FileTable";
 import { OptionsPanel } from "./OptionsPanel";
 
@@ -40,9 +41,15 @@ export async function pickAndAdd(directory: boolean) {
 }
 
 function PickButtons({ big }: { big?: boolean }) {
+  const [phone, setPhone] = useState(false);
   return (
     <div className="flex flex-wrap gap-3">
-      <Button variant={big ? "primary" : "secondary"} size={big ? "lg" : "md"} onClick={() => void pickAndAdd(true)}>
+      <Button variant={big ? "primary" : "secondary"} size={big ? "lg" : "md"} onClick={() => setPhone(true)}>
+        <Smartphone className="size-5" />
+        Перенести с телефона
+      </Button>
+      <PhoneWizard open={phone} onClose={() => setPhone(false)} />
+      <Button size={big ? "lg" : "md"} onClick={() => void pickAndAdd(true)}>
         <FolderPlus className="size-5" />
         Выбрать папку
       </Button>

@@ -272,3 +272,23 @@ export interface Interrupted {
   pending: string[];
   done: number;
 }
+
+/** Мастер «Перенести фото с телефона» (`phone.rs`). */
+export interface PhoneSource {
+  name: string;
+  kind: "phone" | "card";
+}
+export interface PhonePlan {
+  count: number;
+  bytes: number;
+  already: number;
+  photos: number;
+  videos: number;
+}
+export interface PhoneReport {
+  copied: number;
+  bytes: number;
+  outputs: string[];
+  failed: [string, string][];
+  cancelled: boolean;
+}

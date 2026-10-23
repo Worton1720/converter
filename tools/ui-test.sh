@@ -25,13 +25,22 @@ printf '{"entries":[{"id":1700000000000,"finished_ms":null,"action":{"Convert":{
   "$work/files/crash/IMG_C.png" >"$work/state/converter/history.json"
 cp crates/core/tests/fixtures/sample.heic "$work/files/copies/Отпуск (копия).heic"
 
+# «Телефон» для мастера переноса: папка DCIM (CONVERTER_TEST_PHONE — только отладочная сборка),
+# «Изображения» — внутри тестовой папки, чтобы перенос не попал в настоящие.
+mkdir -p "$work/device/DCIM/Camera" "$work/pictures"
+cp crates/core/tests/fixtures/sample.heic "$work/device/DCIM/Camera/IMG_0001.HEIC"
+ffmpeg -v error -f lavfi -i "gradients=s=320x240:c0=0x7c2d12:c1=0xfef3c7:seed=9" -frames:v 1 \
+  "$work/device/DCIM/Camera/IMG_0002.png"
+touch "$work/device/DCIM/Camera/.trashed-1-IMG_0000.jpg"
+printf 'XDG_PICTURES_DIR="%s"\n' "$work/pictures" >"$work/config/user-dirs.dirs"
+
 # Без проверки обновлений: тест не должен ходить в сеть.
 mkdir -p "$work/config/converter"
 printf 'check_updates = false\n' >"$work/config/converter/settings.toml"
 
 export XDG_CONFIG_HOME="$work/config" XDG_CACHE_HOME="$work/cache" \
   XDG_STATE_HOME="$work/state" XDG_DATA_HOME="$work/data" \
-  CONVERTER_TEST_DATA="$work/files"
+  CONVERTER_TEST_DATA="$work/files" CONVERTER_TEST_PHONE="$work/device/DCIM"
 
 # Отладочная сборка берёт интерфейс с сервера разработки Vite.
 [[ -d app/node_modules ]] || pnpm --dir app install --frozen-lockfile
@@ -72,6 +81,9 @@ if [[ $status -eq 0 ]]; then
   for f in "phone/IMG_A.HEIC" "phone/IMG_B.png" "copies/Отпуск.heic" "copies/Отпуск (копия).heic"; do
     [[ -f "$work/files/$f" ]] || { echo "ui-test: нет файла $f после «Вернуть как было»"; status=1; }
   done
+  [[ $(find "$work/pictures/С телефона" -type f | wc -l) -eq 2 ]] ||
+    { echo "ui-test: мастер перенёс не 2 файла в «Изображения/С телефона»"; status=1; }
+  [[ $(find "$work/device" -type f | wc -l) -eq 3 ]] || { echo "ui-test: на «телефоне» что-то пропало"; status=1; }
   [[ -f "$work/files/crash/IMG_C.jpg" ]] || { echo "ui-test: «Доделать» не сделал crash/IMG_C.jpg"; status=1; }
   for f in "phone/IMG_A.jpg" "phone/IMG_B.jpg"; do
     [[ ! -e "$work/files/$f" ]] || { echo "ui-test: результат $f не убран при отмене"; status=1; }

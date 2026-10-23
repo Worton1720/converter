@@ -2,6 +2,7 @@
 
 mod devtest;
 mod dto;
+mod phone;
 mod update;
 
 use std::collections::HashSet;
@@ -78,6 +79,8 @@ struct AppState {
     history: Mutex<History>,
     awake: Mutex<Option<keepawake::KeepAwake>>,
     allow_close: AtomicBool,
+    /// Идёт перенос с телефона (`phone.rs`): закрытие спрашивает, сон запрещён.
+    phone_busy: AtomicBool,
     startup_paths: Mutex<Vec<String>>,
     /// Папки встроенного ffmpeg: ресурсы приложения (известны только после старта Tauri).
     ffmpeg_dirs: Mutex<Vec<PathBuf>>,
@@ -86,7 +89,9 @@ struct AppState {
 
 impl AppState {
     fn busy(&self) -> bool {
-        self.run.lock().unwrap().is_some() || self.dupes.lock().unwrap().cancel.is_some()
+        self.run.lock().unwrap().is_some()
+            || self.dupes.lock().unwrap().cancel.is_some()
+            || self.phone_busy.load(Ordering::Relaxed)
     }
 
     fn engine(&self) -> Result<Engine, String> {
@@ -911,6 +916,7 @@ pub fn run() {
         history: Mutex::new(History::load()),
         awake: Mutex::new(None),
         allow_close: AtomicBool::new(false),
+        phone_busy: AtomicBool::new(false),
         startup_paths: Mutex::new(existing_paths(args)),
         ffmpeg_dirs: Mutex::new(Vec::new()),
         thumb_gate: (Mutex::new(0), Condvar::new()),
@@ -960,6 +966,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(state)
         .manage(update::UpdateState::default())
+        .manage(phone::PhoneState::default())
         .on_page_load(|webview, payload| {
             if payload.event() == tauri::webview::PageLoadEvent::Finished
                 && let Some(script) = devtest::script_once()
@@ -1039,6 +1046,10 @@ pub fn run() {
             history_interrupted,
             history_resume,
             history_dismiss,
+            phone::phone_sources,
+            phone::phone_plan,
+            phone::phone_import,
+            phone::phone_cancel,
             update::check_update,
             update::install_update,
             devtest::dev_report,

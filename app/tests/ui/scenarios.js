@@ -164,6 +164,35 @@
     await until(() => text().includes("Готово, всё вернулось как было"), "итог отмены преобразования");
   });
 
+  await test("перенос с телефона: мастер по шагам", async () => {
+    store().setTab("convert");
+    await click("Перенести с телефона");
+    await until(() => text().includes("Можно перенести"), "план переноса");
+    const dialog = () => document.querySelector("[role=dialog]");
+    // Внутри окна — по точному тексту: «Перенести» есть и в «Перенести с телефона» за окном.
+    const press = async (label) => {
+      const b = await until(
+        () => [...(dialog()?.querySelectorAll("button") ?? [])].find((x) => x.textContent.trim() === label),
+        `кнопка «${label}» в окне`,
+      );
+      b.click();
+    };
+    expect(dialog().innerText.includes("Тестовый телефон"), "нет имени телефона");
+    expect(dialog().innerText.includes("2 фото"), `не то число файлов: ${dialog().innerText}`);
+    expect(dialog().innerText.includes("С телефона ничего не удалится"), "нет обещания не удалять");
+    checkElderlyRules("мастер: план");
+    await press("Перенести");
+    await until(() => text().includes("Перенесено 2 файла"), () => `итог переноса; на экране: ${dialog()?.innerText}`, 60000);
+    checkElderlyRules("мастер: итог");
+    // Повторно — уже всё перенесено.
+    await press("Готово");
+    await until(() => !dialog(), "мастер закрыт");
+    await click("Перенести с телефона");
+    await until(() => text().includes("Всё уже перенесено"), "повтор: «Всё уже перенесено»");
+    await press("Готово");
+    await until(() => !dialog(), "мастер закрыт");
+  });
+
   await test("настройки: понятные слова и крупные цели", async () => {
     await click("Настройки");
     await until(() => text().includes("Крупный текст"), "окно настроек");
