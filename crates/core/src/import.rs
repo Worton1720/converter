@@ -14,7 +14,9 @@ use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
+#[cfg(target_os = "linux")]
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
@@ -140,6 +142,7 @@ fn devices_in(base: &Path, kind: SourceKind, name: impl Fn(&str) -> String) -> V
         .collect()
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn find_dcim(dir: &Path, depth: usize) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -487,6 +490,7 @@ fn copy_one(item: &ImportItem, cancel: &AtomicBool, progress: impl Fn(u64)) -> R
 // ---------- превью для галереи мастера ----------
 
 /// Видео больше этого — без кадра: качать его целиком ради картинки слишком долго.
+#[cfg(target_os = "linux")]
 const PREVIEW_COPY_LIMIT: u64 = 30 << 20;
 
 /// Файл, по которому можно построить миниатюру (протоколом `thumb://`). Для папки — сам файл;
@@ -499,7 +503,10 @@ pub fn preview(location: &Location, size: u64) -> Option<PathBuf> {
         #[cfg(target_os = "linux")]
         Location::Kio(url) => kio_preview(url, size),
         #[cfg(not(target_os = "linux"))]
-        Location::Kio(_) => None,
+        Location::Kio(_) => {
+            let _ = size;
+            None
+        }
     }
 }
 
@@ -554,6 +561,7 @@ fn kio_preview(url: &str, size: u64) -> Option<PathBuf> {
 }
 
 /// Сегмент EXIF (APP1 «Exif\0\0…») из начала JPEG — без чтения всего файла.
+#[cfg(any(target_os = "linux", test))]
 fn jpeg_exif(head: &[u8]) -> Option<&[u8]> {
     if !head.starts_with(&[0xFF, 0xD8]) {
         return None;
