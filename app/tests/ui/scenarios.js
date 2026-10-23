@@ -164,6 +164,131 @@
     await until(() => text().includes("Готово, всё вернулось как было"), "итог отмены преобразования");
   });
 
+  await test("выделение: выбрать нажатием, действия над выбранными", async () => {
+    store().setTab("convert");
+    await invoke("add_paths", { paths: [`${data}/copies`] });
+    await until(() => store().order.length >= 4, "файлы в списке");
+    const tile = (name) =>
+      [...document.querySelectorAll("[role=button][aria-pressed]")].find((t) => t.getAttribute("aria-label").startsWith(name));
+    const first = await until(() => tile("Отпуск.heic"), "картинка «Отпуск.heic»");
+    first.click();
+    await until(() => text().includes(`Выбрано 1 из ${store().order.length}`), "полоса «Выбрано 1 из …»");
+    expect(button("Начать — выбранные (1)"), "кнопка «Начать» не про выбранные");
+    expect(text().includes("Будет обработано только выбранные: 1 фото"), "нет пояснения про выбранные");
+    checkElderlyRules("выделение");
+    // Shift — диапазон от прошлого нажатия.
+    const second = tile("Отпуск (копия).heic");
+    second.dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true }));
+    await until(() => store().selected.size >= 2, "выбор диапазоном");
+    await click("Убрать выбранные из списка");
+    await until(() => !store().order.some((p) => p.includes("/copies/")), "выбранные убраны из списка");
+    expect(store().selected.size === 0, "после удаления осталось выделение");
+    const starts = [...document.querySelectorAll("button")].filter(visible).map((b) => b.textContent.trim()).filter((t) => t.startsWith("Начать"));
+    expect(!starts.some((t) => t.includes("выбранные")), `осталась кнопка про выбранные: ${JSON.stringify(starts)}`);
+  });
+
+  await test("выделение рамкой: мышью, Shift — добавить, Ctrl — убрать, Esc — отменить", async () => {
+    store().setTab("convert");
+    await invoke("add_paths", { paths: [`${data}/copies`] });
+    await until(() => store().order.length >= 4, "файлы в списке");
+    store().select([], "set");
+    const tiles = await until(() => {
+      const t = [...document.querySelectorAll("[role=button][aria-pressed]")];
+      return t.length >= 3 && t;
+    }, "три картинки на экране");
+    const name = (t) => t.getAttribute("aria-label").replace(/, выбрано$/, "");
+    const center = (t) => {
+      const r = t.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    };
+    // Протянуть рамку от `from` до `to` (точки на экране) с клавишами.
+    const drag = async (from, to, keys = {}, cancel = false) => {
+      const opts = (p) => ({ bubbles: true, clientX: p.x, clientY: p.y, button: 0, pointerId: 1, ...keys });
+      document.elementFromPoint(from.x, from.y).dispatchEvent(new PointerEvent("pointerdown", opts(from)));
+      for (let k = 1; k <= 5; k++) {
+        const p = { x: from.x + ((to.x - from.x) * k) / 5, y: from.y + ((to.y - from.y) * k) / 5 };
+        window.dispatchEvent(new PointerEvent("pointermove", opts(p)));
+        await sleep(30);
+      }
+      if (cancel) window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+      else window.dispatchEvent(new PointerEvent("pointerup", opts(to)));
+      await sleep(100);
+    };
+    const sel = () => [...store().selected].map((p) => p.split("/").pop()).sort();
+    const [a, b, c] = tiles;
+    const ra = a.getBoundingClientRect();
+    // Рамка от левого верхнего угла первой картинки до середины второй — выбраны обе.
+    await drag({ x: ra.left + 4, y: ra.top + 4 }, center(b));
+    expect(sel().length === 2 && sel().includes(name(a)) && sel().includes(name(b)), `рамка: ${sel()}`);
+    // С Ctrl — снять первую.
+    await drag({ x: ra.left + 4, y: ra.top + 4 }, center(a), { ctrlKey: true });
+    expect(sel().length === 1 && sel()[0] === name(b), `Ctrl: ${sel()}`);
+    // С Shift — добавить третью.
+    const rc = c.getBoundingClientRect();
+    await drag({ x: rc.left + 4, y: rc.top + 4 }, center(c), { shiftKey: true });
+    expect(sel().length === 2 && sel().includes(name(c)), `Shift: ${sel()}`);
+    // Esc посреди рамки — выделение как было.
+    await drag({ x: ra.left + 4, y: ra.top + 4 }, center(c), {}, true);
+    expect(sel().length === 2 && sel().includes(name(b)) && sel().includes(name(c)), `Esc: ${sel()}`);
+    // Рамка не превращается в щелчок: после неё картинка не переключилась.
+    expect(text().includes(`Выбрано 2 из ${store().order.length}`), "полоса выделения не совпадает");
+    store().select([], "set");
+    store().removePaths(store().order.filter((p) => p.includes("/copies/")));
+  });
+
+  await test("перенос с телефона: мастер по шагам", async () => {
+    store().setTab("convert");
+    await click("Перенести с телефона");
+    await until(() => text().includes("Можно перенести"), "план переноса");
+    const dialog = () => document.querySelector("[role=dialog]");
+    // Внутри окна — по точному тексту: «Перенести» есть и в «Перенести с телефона» за окном.
+    const press = async (label) => {
+      const b = await until(
+        () => [...(dialog()?.querySelectorAll("button") ?? [])].find((x) => x.textContent.trim() === label),
+        `кнопка «${label}» в окне`,
+      );
+      b.click();
+    };
+    expect(dialog().innerText.includes("Тестовый телефон"), "нет имени телефона");
+    expect(dialog().innerText.includes("2 фото"), `не то число файлов: ${dialog().innerText}`);
+    expect(dialog().innerText.includes("С телефона ничего не удалится"), "нет обещания не удалять");
+    checkElderlyRules("мастер: галерея");
+    expect(text().includes("Выбрано 2 из 2"), "по умолчанию выбрано не всё");
+    expect(button("Выбрать весь месяц") || button("Снять весь месяц"), "нет выбора месяца");
+    // Снять один снимок нажатием — переносится только выбранное.
+    const tiles = () => [...dialog().querySelectorAll("[role=button][aria-pressed]")];
+    // Снять первый снимок рамкой с Ctrl.
+    const r0 = tiles()[0].getBoundingClientRect();
+    const o = (x, y) => ({ bubbles: true, clientX: x, clientY: y, button: 0, pointerId: 1, ctrlKey: true });
+    document.elementFromPoint(r0.left + 6, r0.top + 6).dispatchEvent(new PointerEvent("pointerdown", o(r0.left + 6, r0.top + 6)));
+    for (let k = 1; k <= 4; k++) {
+      window.dispatchEvent(new PointerEvent("pointermove", o(r0.left + 6 + k * 15, r0.top + 6 + k * 15)));
+      await sleep(30);
+    }
+    window.dispatchEvent(new PointerEvent("pointerup", o(r0.left + 66, r0.top + 66)));
+    // Сразу после рамки щелчок глушится (отпускание — не щелчок по снимку) — как у человека, пауза.
+    await sleep(100);
+    await until(() => text().includes("Выбрано 1 из 2"), () => `рамка в галерее: ${dialog()?.innerText.slice(0, 200)}`);
+    await press("Перенести выбранные (1)");
+    await until(() => text().includes("Перенесено 1 файл"), () => `итог переноса; в окне: ${dialog()?.innerHTML.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, 400)}; кнопки: ${[...document.querySelectorAll("button")].map((b) => b.textContent.trim()).filter(Boolean).join("|")}`, 60000);
+    checkElderlyRules("мастер: итог");
+    await press("Готово");
+    await until(() => !dialog(), "мастер закрыт");
+    // Второй раз — остался один новый снимок, он и переносится.
+    await click("Перенести с телефона");
+    await until(() => text().includes("Выбрано 1 из 1"), "второй раз: «Выбрано 1 из 1»");
+    expect(text().includes("Ещё 1 файл уже перенесено раньше"), `нет упоминания перенесённого: ${dialog()?.innerText}`);
+    await press("Перенести всё");
+    await until(() => text().includes("Перенесено 1 файл"), "второй перенос", 60000);
+    await press("Готово");
+    await until(() => !dialog(), "мастер закрыт");
+    // Третий раз — всё уже перенесено.
+    await click("Перенести с телефона");
+    await until(() => text().includes("Всё уже перенесено"), "повтор: «Всё уже перенесено»");
+    await press("Готово");
+    await until(() => !dialog(), "мастер закрыт");
+  });
+
   await test("настройки: понятные слова и крупные цели", async () => {
     await click("Настройки");
     await until(() => text().includes("Крупный текст"), "окно настроек");

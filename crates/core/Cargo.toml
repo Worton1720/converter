@@ -19,7 +19,11 @@ crossbeam-channel.workspace = true
 libheif-rs = { version = "3", default-features = false, features = ["v1_17"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "bmp", "tiff"] }
 png = "0.18"
-jpeg-encoder = { version = "0.7", features = ["simd"] }
+# Кодирование JPEG: libjpeg-turbo с SIMD — на 15 % быстрее пачки и на 27 % быстрее одного фото,
+# чем jpeg-encoder (замер 2026-10-23, docs/LESSONS.md). Источник библиотеки — TURBOJPEG_SOURCE:
+# в CI и выпусках «vendor» (сборка из исходников, статически, нужен nasm), локально по умолчанию
+# «pkg-config» (.cargo/config.toml) — системная libjpeg-turbo ≥ 3.0. Без SIMD сборка падает.
+turbojpeg = { version = "1.5", default-features = false, features = ["cmake", "pkg-config", "require-simd"] }
 webp = "0.3"
 fast_image_resize = "5"
 lcms2 = "6"

@@ -13,6 +13,7 @@ pub mod fs_ops;
 pub mod governor;
 pub mod history;
 pub mod hw;
+pub mod import;
 pub mod logfile;
 pub mod media;
 pub mod options;

@@ -171,14 +171,19 @@ export function Switch({
 }
 
 /** Флажок «убрать этот файл»; крупная область нажатия вокруг квадрата. */
+/** `remove` — красный крестик («убрать эту копию»), `select` — синяя галочка («выбрано»). */
 export function Checkbox({
   checked,
   onChange,
   label,
+  tone = "remove",
+  className,
 }: {
   checked: boolean;
   onChange: (v: boolean) => void;
   label: string;
+  tone?: "remove" | "select";
+  className?: string;
 }) {
   return (
     <CheckboxPrimitive.Root
@@ -186,11 +191,22 @@ export function Checkbox({
       onCheckedChange={(v) => onChange(v === true)}
       aria-label={label}
       onClick={(e) => e.stopPropagation()}
-      className="group flex size-11 shrink-0 items-center justify-center rounded-lg hover:bg-sunken"
+      className={clsx("group flex size-11 shrink-0 items-center justify-center rounded-lg hover:bg-sunken", className)}
     >
-      <span className="flex size-6 items-center justify-center rounded-md border-2 border-line-strong bg-surface group-data-[state=checked]:border-err group-data-[state=checked]:bg-err">
+      <span
+        className={clsx(
+          "flex size-6 items-center justify-center rounded-md border-2 border-line-strong bg-surface",
+          tone === "remove"
+            ? "group-data-[state=checked]:border-err group-data-[state=checked]:bg-err"
+            : "group-data-[state=checked]:border-accent group-data-[state=checked]:bg-accent",
+        )}
+      >
         <CheckboxPrimitive.Indicator>
-          <X className="size-4 text-white" strokeWidth={3} />
+          {tone === "remove" ? (
+            <X className="size-4 text-white" strokeWidth={3} />
+          ) : (
+            <Check className="size-4 text-white" strokeWidth={3} />
+          )}
         </CheckboxPrimitive.Indicator>
       </span>
     </CheckboxPrimitive.Root>

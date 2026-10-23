@@ -1,0 +1,7 @@
+# Откуда брать libjpeg-turbo для крейта turbojpeg (crates/core/Cargo.toml).
+# Локально — системная библиотека ≥ 3.0 через pkg-config (Arch, Fedora 40+…).
+# CI и выпуски задают TURBOJPEG_SOURCE=vendor и TURBOJPEG_STATIC=1 сами: сборка из исходников
+# со SIMD (нужны cmake и nasm), вшивается в программу. Без системной 3.x — так же и локально:
+#   TURBOJPEG_SOURCE=vendor cargo build
+[env]
+TURBOJPEG_SOURCE = { value = "pkg-config", force = false }

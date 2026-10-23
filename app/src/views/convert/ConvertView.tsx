@@ -1,6 +1,6 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
-import { FilePlus2, FolderOpen, FolderPlus, LayoutGrid, List, Pause, Play, Square } from "lucide-react";
+import { FilePlus2, FolderOpen, FolderPlus, LayoutGrid, List, Pause, Play, Smartphone, Square } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Button, Dialog, ProgressBar, Step } from "../../components/ui";
 import { api } from "../../lib/api";
@@ -8,6 +8,7 @@ import { basename, bytes, dirname, etaWords, files, mediaCount, plainError } fro
 import { useStore } from "../../lib/store";
 import type { ConvertOptions, Interrupted, SpaceCheck, SpaceEstimate } from "../../lib/types";
 import { FileGrid } from "./FileGrid";
+import { PhoneWizard } from "./PhoneWizard";
 import { FileTable } from "./FileTable";
 import { OptionsPanel } from "./OptionsPanel";
 
@@ -40,9 +41,15 @@ export async function pickAndAdd(directory: boolean) {
 }
 
 function PickButtons({ big }: { big?: boolean }) {
+  const [phone, setPhone] = useState(false);
   return (
     <div className="flex flex-wrap gap-3">
-      <Button variant={big ? "primary" : "secondary"} size={big ? "lg" : "md"} onClick={() => void pickAndAdd(true)}>
+      <Button variant={big ? "primary" : "secondary"} size={big ? "lg" : "md"} onClick={() => setPhone(true)}>
+        <Smartphone className="size-5" />
+        Перенести с телефона
+      </Button>
+      <PhoneWizard open={phone} onClose={() => setPhone(false)} />
+      <Button size={big ? "lg" : "md"} onClick={() => void pickAndAdd(true)}>
         <FolderPlus className="size-5" />
         Выбрать папку
       </Button>
@@ -111,6 +118,53 @@ function ResumeBanner() {
   );
 }
 
+/** Действия над выбранными файлами — видны, пока что-то выбрано (без Ctrl и правой кнопки, ТЗ 8.5). */
+function SelectionBar() {
+  const order = useStore((s) => s.order);
+  const selected = useStore((s) => s.selected);
+  const rows = useStore((s) => s.rows);
+  const select = useStore((s) => s.select);
+  const removePaths = useStore((s) => s.removePaths);
+  const runActive = useStore((s) => s.run.active);
+  const n = order.filter((p) => selected.has(p)).length;
+  if (n === 0) {
+    return (
+      <p className="px-6 pt-3 text-[14px] text-muted">
+        Нажмите на фото или видео, чтобы выбрать его, — тогда можно преобразовать или убрать из списка только выбранные.
+        Несколько сразу — обведите их мышью с зажатой кнопкой (с Shift — добавить, с Ctrl — убрать из выбранных).
+      </p>
+    );
+  }
+  const kinds = (kind: "image" | "video") => order.filter((p) => rows[p]?.item.kind === kind);
+  const removable = order.filter((p) => selected.has(p) && rows[p]?.job.status !== "running");
+  return (
+    <div className="flex flex-wrap items-center gap-3 border-b border-line bg-accent-soft px-6 py-2">
+      <span className="text-[16px] font-medium">
+        Выбрано {n} из {order.length}
+      </span>
+      <Button variant="ghost" disabled={n === order.length} onClick={() => select(order, "set")}>
+        Выбрать все
+      </Button>
+      {kinds("image").length > 0 && kinds("video").length > 0 && (
+        <>
+          <Button variant="ghost" onClick={() => select(kinds("image"), "set")}>
+            Только фото
+          </Button>
+          <Button variant="ghost" onClick={() => select(kinds("video"), "set")}>
+            Только видео
+          </Button>
+        </>
+      )}
+      <Button variant="ghost" onClick={() => select([], "set")}>
+        Снять выделение
+      </Button>
+      <Button className="ml-auto" disabled={!removable.length || (runActive && removable.length < n)} onClick={() => removePaths(removable)}>
+        Убрать выбранные из списка
+      </Button>
+    </div>
+  );
+}
+
 export function ConvertView() {
   const order = useStore((s) => s.order);
   const rows = useStore((s) => s.rows);
@@ -153,6 +207,7 @@ export function ConvertView() {
             </div>
           )}
         </div>
+        {order.length > 0 && <SelectionBar />}
         {order.length === 0 ? <EmptyState /> : asList ? <FileTable paths={order} /> : <FileGrid paths={order} />}
       </section>
 
@@ -196,10 +251,19 @@ function RunPanel() {
   const options = useStore((s) => s.settings?.convert);
   const [estimate, setEstimate] = useState<SpaceEstimate | null>(null);
 
-  // Запускаем всё, что ещё не готово.
+  // Запускаем всё, что ещё не готово; если что-то выбрано — только выбранное.
+  const selected = useStore((s) => s.selected);
+  const onlySelected = useMemo(() => order.some((p) => selected.has(p)), [order, selected]);
   const targets = useMemo(
-    () => order.filter((p) => rows[p] && rows[p].job.status !== "done" && rows[p].job.status !== "running"),
-    [order, rows],
+    () =>
+      order.filter(
+        (p) =>
+          rows[p] &&
+          rows[p].job.status !== "done" &&
+          rows[p].job.status !== "running" &&
+          (!onlySelected || selected.has(p)),
+      ),
+    [order, rows, selected, onlySelected],
   );
   const targetCounts = useMemo(() => {
     let images = 0;
@@ -357,8 +421,10 @@ function RunPanel() {
           <div className="space-y-1">
             <p className="text-[16px] text-muted">
               {targets.length
-                ? `Будет обработано ${mediaCount(targetCounts.images, targetCounts.videos)}.`
-                : "Сначала выберите фото и видео — шаг 1."}
+                ? `Будет обработано ${onlySelected ? "только выбранные: " : ""}${mediaCount(targetCounts.images, targetCounts.videos)}.`
+                : onlySelected
+                  ? "Выбранные файлы уже готовы. Снимите выделение, чтобы обработать остальные."
+                  : "Сначала выберите фото и видео — шаг 1."}
             </p>
             {targets.length > 0 && estimate && options && (
               <p className="text-[16px] text-muted">{spaceWords(estimate, options.sources)}</p>
@@ -373,7 +439,7 @@ function RunPanel() {
           onClick={() => void launch(targets)}
         >
           <Play className="size-5" />
-          Начать
+          {onlySelected ? `Начать — выбранные (${targets.length})` : "Начать"}
         </Button>
       </div>
     );

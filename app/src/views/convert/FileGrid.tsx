@@ -2,6 +2,8 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import clsx from "clsx";
 import { Check } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { Checkbox } from "../../components/ui";
+import { intersects, marqueeStyle, useMarquee } from "../../lib/marquee";
 import { useStore, type Row } from "../../lib/store";
 import { Thumb } from "./FileTable";
 
@@ -47,7 +49,10 @@ function TileStatus({ row }: { row: Row }) {
 
 export function FileGrid({ paths }: { paths: string[] }) {
   const rows = useStore((s) => s.rows);
+  const selected = useStore((s) => s.selected);
+  const clickSelect = useStore((s) => s.clickSelect);
   const parentRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const [columns, setColumns] = useState(4);
 
   useEffect(() => {
@@ -61,6 +66,17 @@ export function FileGrid({ paths }: { paths: string[] }) {
   }, []);
 
   const lines = Math.ceil(paths.length / columns);
+  // Рамка: попадание по геометрии сетки — плиток вне экрана в DOM нет.
+  const marquee = useMarquee({
+    area: parentRef,
+    content: contentRef,
+    hits: (r) =>
+      paths.filter((_, i) =>
+        intersects(r, (i % columns) * (TILE + GAP), Math.floor(i / columns) * (TILE_HEIGHT + GAP), TILE, TILE_HEIGHT),
+      ),
+    selected: () => useStore.getState().selected,
+    apply: (next) => useStore.getState().select([...next], "set"),
+  });
   const virtualizer = useVirtualizer({
     count: lines,
     getScrollElement: () => parentRef.current,
@@ -69,8 +85,11 @@ export function FileGrid({ paths }: { paths: string[] }) {
   });
 
   return (
-    <div ref={parentRef} className="min-h-0 flex-1 overflow-y-auto px-6 pt-2 pb-6">
-      <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
+    <div ref={parentRef} onPointerDown={marquee.onPointerDown} className="min-h-0 flex-1 overflow-y-auto px-6 pt-2 pb-6">
+      <div ref={contentRef} style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
+        {marquee.box && (
+          <div style={marqueeStyle(marquee.box)} className="rounded border-2 border-accent bg-accent/15" />
+        )}
         {virtualizer.getVirtualItems().map((v) => (
           <div
             key={v.index}
@@ -80,16 +99,29 @@ export function FileGrid({ paths }: { paths: string[] }) {
             {paths.slice(v.index * columns, v.index * columns + columns).map((path) => {
               const row = rows[path];
               if (!row) return null;
+              const isSel = selected.has(path);
+              // Нажатие по картинке выбирает её (ТЗ 8.5: без Ctrl); Shift — диапазон.
               return (
                 <div
                   key={path}
+                  role="button"
+                  aria-pressed={isSel}
+                  aria-label={`${row.item.name}${isSel ? ", выбрано" : ""}`}
+                  onClick={(e) => clickSelect(path, paths, e.shiftKey)}
                   style={{ width: TILE, height: TILE_HEIGHT }}
                   className={clsx(
-                    "flex shrink-0 flex-col gap-2 rounded-xl border bg-surface p-2",
-                    row.job.status === "failed" ? "border-err" : "border-line",
+                    "relative flex shrink-0 cursor-pointer flex-col gap-2 rounded-xl border-2 bg-surface p-2",
+                    isSel ? "border-accent bg-accent-soft" : row.job.status === "failed" ? "border-err" : "border-line",
                   )}
                 >
                   <Thumb path={path} kind={row.item.kind} size={150} />
+                  <Checkbox
+                    tone="select"
+                    checked={isSel}
+                    onChange={() => clickSelect(path, paths, false)}
+                    label={`Выбрать ${row.item.name}`}
+                    className="absolute top-1 left-1 bg-surface/80"
+                  />
                   <div className="min-w-0 px-1">
                     <div className="truncate text-[14px]" title={row.item.name}>
                       {row.item.name}

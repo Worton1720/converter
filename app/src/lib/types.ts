@@ -126,6 +126,8 @@ export interface AppInfo {
   settings: Settings;
   settings_path: string;
   log_path: string;
+  /** Переносная версия: папка с её данными рядом с программой. */
+  portable_dir: string | null;
   startup_paths: string[];
   status: GovernorStatus | null;
 }
@@ -271,4 +273,33 @@ export interface Interrupted {
   id: number;
   pending: string[];
   done: number;
+}
+
+/** Мастер «Перенести фото с телефона» (`phone.rs`). */
+export interface PhoneSource {
+  name: string;
+  kind: "phone" | "card";
+}
+/** Новый файл на телефоне — плитка галереи (номер = индекс в `items`). */
+export interface PhonePlanItem {
+  name: string;
+  size: number;
+  /** «ГГГГ-ММ» или «Без даты». */
+  month: string;
+  video: boolean;
+}
+export interface PhonePlan {
+  count: number;
+  items: PhonePlanItem[];
+  bytes: number;
+  already: number;
+  photos: number;
+  videos: number;
+}
+export interface PhoneReport {
+  copied: number;
+  bytes: number;
+  outputs: string[];
+  failed: [string, string][];
+  cancelled: boolean;
 }

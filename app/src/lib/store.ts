@@ -84,7 +84,11 @@ interface Store {
   replaceItems: (items: Item[]) => void;
   removePaths: (paths: string[]) => void;
   clearItems: () => void;
-  select: (paths: string[], mode: "set" | "toggle" | "add") => void;
+  select: (paths: string[], mode: "set" | "toggle" | "add" | "remove") => void;
+  /** Последний файл, по которому нажимали: от него Shift выбирает диапазон. */
+  selectAnchor: string | null;
+  /** Нажатие по файлу: переключить; с Shift — выбрать всё от прошлого нажатия до этого. */
+  clickSelect: (path: string, order: string[], range: boolean) => void;
   startRun: (paths: string[]) => void;
   applyEvents: (events: EngineEvent[]) => void;
   setPaused: (paused: boolean) => void;
@@ -131,6 +135,7 @@ export const useStore = create<Store>((set, get) => ({
   rows: {},
   order: [],
   selected: new Set(),
+  selectAnchor: null,
   run: { active: false, paused: false, noSpace: null, startedAt: 0, paths: [], finished: 0, summary: null },
   jobPaths: {},
   log: [],
@@ -191,11 +196,23 @@ export const useStore = create<Store>((set, get) => ({
       if (mode === "set") return { selected: new Set(paths) };
       const selected = new Set(st.selected);
       for (const p of paths) {
-        if (mode === "toggle" && selected.has(p)) selected.delete(p);
+        if (mode === "remove" || (mode === "toggle" && selected.has(p))) selected.delete(p);
         else selected.add(p);
       }
       return { selected };
     }),
+
+  clickSelect: (path, order, range) => {
+    const { selectAnchor, select } = get();
+    const a = selectAnchor ? order.indexOf(selectAnchor) : -1;
+    const b = order.indexOf(path);
+    if (range && a >= 0 && b >= 0) {
+      select(order.slice(Math.min(a, b), Math.max(a, b) + 1), "add");
+    } else {
+      select([path], "toggle");
+    }
+    set({ selectAnchor: path });
+  },
 
   startRun: (paths) =>
     set((st) => {

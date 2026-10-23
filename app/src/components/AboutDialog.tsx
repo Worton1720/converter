@@ -15,6 +15,7 @@ const COMPONENTS: { name: string; license: string; url: string; note?: string }[
   { name: "libheif", license: "LGPL 3.0", url: "https://github.com/strukturag/libheif" },
   { name: "libde265", license: "LGPL 3.0", url: "https://github.com/strukturag/libde265" },
   { name: "libwebp", license: "BSD", url: "https://chromium.googlesource.com/webm/libwebp" },
+  { name: "libjpeg-turbo", license: "BSD / IJG / zlib", url: "https://libjpeg-turbo.org" },
   { name: "Little CMS", license: "MIT", url: "https://www.littlecms.com" },
   { name: "Tauri", license: "MIT / Apache 2.0", url: "https://tauri.app" },
   { name: "React", license: "MIT", url: "https://react.dev" },
@@ -45,6 +46,12 @@ export function AboutDialog({ open, onClose }: { open: boolean; onClose: () => v
             Переводит фото и видео с телефона в форматы, которые открываются везде, и находит одинаковые файлы.
             Распространяется бесплатно по лицензии MIT.
           </p>
+          {info?.portable_dir && (
+            <p className="text-muted">
+              Переносная версия: настройки и журналы хранятся рядом с программой, в папке «{info.portable_dir}».
+              Обновляется вручную — скачайте новый архив и замените файлы, папку data оставьте.
+            </p>
+          )}
         </div>
         <div className="space-y-2">
           <h3 className="text-[18px] font-semibold">Что входит в программу</h3>

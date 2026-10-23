@@ -2,14 +2,15 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import clsx from "clsx";
 import { FolderOpen, Image as ImageIcon, Play, X } from "lucide-react";
-import { useMemo, useRef } from "react";
-import { IconButton } from "../../components/ui";
+import { useRef } from "react";
+import { Checkbox, IconButton } from "../../components/ui";
 import { api } from "../../lib/api";
 import { basename, bytes, dirname, duration, megapixels, plainError } from "../../lib/format";
+import { intersects, marqueeStyle, useMarquee } from "../../lib/marquee";
 import { useStore, type Row } from "../../lib/store";
 import { useThumb } from "../../lib/thumbs";
 
-const COLS = "grid-cols-[48px_minmax(0,1fr)_84px_96px_170px_190px_150px]";
+const COLS = "grid-cols-[44px_48px_minmax(0,1fr)_84px_96px_170px_190px_150px]";
 
 export function Thumb({ path, kind, size = 44 }: { path: string; kind: "image" | "video" | null; size?: number }) {
   const src = useThumb(path);
@@ -86,30 +87,26 @@ export function FileTable({ paths }: { paths: string[] }) {
   const rows = useStore((s) => s.rows);
   const selected = useStore((s) => s.selected);
   const select = useStore((s) => s.select);
+  const clickSelect = useStore((s) => s.clickSelect);
   const removePaths = useStore((s) => s.removePaths);
   const runActive = useStore((s) => s.run.active);
   const parentRef = useRef<HTMLDivElement>(null);
-  const anchor = useRef<string | null>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  // Рамка: строки по 64 px во всю ширину.
+  const marquee = useMarquee({
+    area: parentRef,
+    content: contentRef,
+    hits: (r) => paths.filter((_, i) => intersects(r, 0, i * 64, Number.MAX_SAFE_INTEGER, 64)),
+    selected: () => useStore.getState().selected,
+    apply: (next) => useStore.getState().select([...next], "set"),
+  });
 
-  const index = useMemo(() => new Map(paths.map((p, i) => [p, i])), [paths]);
   const virtualizer = useVirtualizer({
     count: paths.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => 64,
     overscan: 12,
   });
-
-  const onRowClick = (path: string, e: React.MouseEvent) => {
-    if (e.shiftKey && anchor.current && index.has(anchor.current)) {
-      const a = index.get(anchor.current)!;
-      const b = index.get(path)!;
-      const [from, to] = a < b ? [a, b] : [b, a];
-      select(paths.slice(from, to + 1), "set");
-      return;
-    }
-    anchor.current = path;
-    select([path], e.ctrlKey || e.metaKey ? "toggle" : "set");
-  };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
     if ((e.key === "Delete" || e.key === "Backspace") && selected.size > 0) {
@@ -128,6 +125,7 @@ export function FileTable({ paths }: { paths: string[] }) {
     <div className="flex min-h-0 flex-1 flex-col" onKeyDown={onKeyDown} tabIndex={0} aria-label="Список файлов">
       <div className={clsx("grid shrink-0 gap-3 border-b border-line px-4 py-2 text-[14px] text-muted", COLS)}>
         <span />
+        <span />
         <span>Файл</span>
         <span>Тип</span>
         <span className="text-right">Размер</span>
@@ -135,8 +133,11 @@ export function FileTable({ paths }: { paths: string[] }) {
         <span>Состояние</span>
         <span />
       </div>
-      <div ref={parentRef} className="min-h-0 flex-1 overflow-y-auto">
-        <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
+      <div ref={parentRef} onPointerDown={marquee.onPointerDown} className="min-h-0 flex-1 overflow-y-auto">
+        <div ref={contentRef} style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
+          {marquee.box && (
+            <div style={marqueeStyle(marquee.box)} className="rounded border-2 border-accent bg-accent/15" />
+          )}
           {virtualizer.getVirtualItems().map((v) => {
             const path = paths[v.index];
             const row = rows[path];
@@ -146,7 +147,7 @@ export function FileTable({ paths }: { paths: string[] }) {
             return (
               <div
                 key={path}
-                onClick={(e) => onRowClick(path, e)}
+                onClick={(e) => clickSelect(path, paths, e.shiftKey)}
                 style={{ position: "absolute", top: 0, left: 0, right: 0, height: v.size, transform: `translateY(${v.start}px)` }}
                 className={clsx(
                   "grid items-center gap-3 border-b border-line/60 px-4",
@@ -154,6 +155,12 @@ export function FileTable({ paths }: { paths: string[] }) {
                   isSel ? "bg-accent-soft" : "hover:bg-sunken/70",
                 )}
               >
+                <Checkbox
+                  tone="select"
+                  checked={isSel}
+                  onChange={() => clickSelect(path, paths, false)}
+                  label={`Выбрать ${item.name}`}
+                />
                 <Thumb path={item.path} kind={item.kind} />
                 <div className="min-w-0">
                   <div className="truncate text-[16px]">

@@ -2,6 +2,7 @@
 
 mod devtest;
 mod dto;
+mod phone;
 mod update;
 
 use std::collections::HashSet;
@@ -78,6 +79,8 @@ struct AppState {
     history: Mutex<History>,
     awake: Mutex<Option<keepawake::KeepAwake>>,
     allow_close: AtomicBool,
+    /// Идёт перенос с телефона (`phone.rs`): закрытие спрашивает, сон запрещён.
+    phone_busy: AtomicBool,
     startup_paths: Mutex<Vec<String>>,
     /// Папки встроенного ffmpeg: ресурсы приложения (известны только после старта Tauri).
     ffmpeg_dirs: Mutex<Vec<PathBuf>>,
@@ -86,7 +89,9 @@ struct AppState {
 
 impl AppState {
     fn busy(&self) -> bool {
-        self.run.lock().unwrap().is_some() || self.dupes.lock().unwrap().cancel.is_some()
+        self.run.lock().unwrap().is_some()
+            || self.dupes.lock().unwrap().cancel.is_some()
+            || self.phone_busy.load(Ordering::Relaxed)
     }
 
     fn engine(&self) -> Result<Engine, String> {
@@ -197,6 +202,8 @@ fn app_info_of(state: &AppState) -> AppInfo {
         settings: state.settings.lock().unwrap().clone(),
         settings_path: Settings::path().to_string_lossy().into_owned(),
         log_path: state.log.path().to_string_lossy().into_owned(),
+        portable_dir: converter_core::paths::portable_root()
+            .map(|p| p.to_string_lossy().into_owned()),
         startup_paths: std::mem::take(&mut *state.startup_paths.lock().unwrap()),
         status: state.governor.last_status(),
     }
@@ -894,6 +901,13 @@ fn existing_paths(args: impl IntoIterator<Item = String>) -> Vec<String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Переносная версия: данные WebView2 (кэш страницы, хранилище) — тоже рядом с программой,
+    // а не в %LOCALAPPDATA%. Переменную WebView2 читает при создании окна.
+    #[cfg(windows)]
+    if let Some(root) = converter_core::paths::portable_root() {
+        // SAFETY: до запуска потоков — окружение никто не читает параллельно.
+        unsafe { std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", root.join("webview")) };
+    }
     let args = devtest::take_args(std::env::args().skip(1).collect());
     let removed = fs_ops::cleanup_stale_temps();
     let settings = Settings::load();
@@ -911,6 +925,7 @@ pub fn run() {
         history: Mutex::new(History::load()),
         awake: Mutex::new(None),
         allow_close: AtomicBool::new(false),
+        phone_busy: AtomicBool::new(false),
         startup_paths: Mutex::new(existing_paths(args)),
         ffmpeg_dirs: Mutex::new(Vec::new()),
         thumb_gate: (Mutex::new(0), Condvar::new()),
@@ -951,15 +966,21 @@ pub fn run() {
             }
         }))
     };
+    // Размер, положение и «развёрнуто» окна между запусками (FR-13.5). Не в переносной версии:
+    // модуль пишет в профиль пользователя, а она не должна оставлять там следов.
+    let builder = if converter_core::paths::portable_root().is_some() {
+        builder
+    } else {
+        builder.plugin(tauri_plugin_window_state::Builder::default().build())
+    };
     builder
-        // Размер, положение и «развёрнуто» окна между запусками (FR-13.5).
-        .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(state)
         .manage(update::UpdateState::default())
+        .manage(phone::PhoneState::default())
         .on_page_load(|webview, payload| {
             if payload.event() == tauri::webview::PageLoadEvent::Finished
                 && let Some(script) = devtest::script_once()
@@ -1039,6 +1060,11 @@ pub fn run() {
             history_interrupted,
             history_resume,
             history_dismiss,
+            phone::phone_sources,
+            phone::phone_plan,
+            phone::phone_import,
+            phone::phone_preview,
+            phone::phone_cancel,
             update::check_update,
             update::install_update,
             devtest::dev_report,
