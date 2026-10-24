@@ -6,6 +6,11 @@
 //! карты памяти и телефоны в режиме флешки — подключённые диски с папкой `DCIM`.
 //! Своих драйверов нет: они спорили бы с рабочим столом за доступ к устройству.
 //!
+//! У Android снимки лежат не только в `DCIM`: мессенджеры, браузер и ВК кладут их в
+//! `Pictures`, `Movies`, `Download`, `Android/media`. Поэтому там просматривается вся
+//! память — по тем же правилам, что у галереи телефона: без скрытых папок и папок с
+//! `.nomedia`. У iPhone и карт памяти снимки только в `DCIM`.
+//!
 //! С телефона ничего не удаляется. Файлы раскладываются по папкам «ГГГГ-ММ» по дате
 //! изменения (у снимков с телефона это время съёмки — дату внутри файла по MTP читать
 //! дорого). Уже перенесённое (то же имя и размер) пропускается — перенос можно повторять.
@@ -58,13 +63,14 @@ impl Location {
 pub struct Source {
     pub name: String,
     pub kind: SourceKind,
-    /// Папки `DCIM` на устройстве (у телефона с картой памяти — несколько).
+    /// Где искать: у Android — накопители целиком (у телефона с картой памяти их два),
+    /// у iPhone и карт памяти — папки `DCIM`.
     pub roots: Vec<Location>,
 }
 
 // ---------- поиск устройств ----------
 
-/// Подключённые телефоны и карты памяти, на которых есть папка `DCIM`.
+/// Подключённые телефоны и карты памяти со снимками (с папкой `DCIM`).
 /// Пустой список — устройства нет или телефон не разрешил доступ (заблокирован экран,
 /// не выбран режим «Передача файлов», на iPhone не нажато «Доверять»).
 pub fn find_sources() -> Vec<Source> {
@@ -119,7 +125,8 @@ pub fn find_sources() -> Vec<Source> {
 }
 
 /// Подпапки `base` — по устройству на каждую; у каждого ищется `DCIM` на глубине до двух
-/// (MTP: устройство/накопитель/DCIM, iPhone и карта: устройство/DCIM).
+/// (MTP: устройство/накопитель/DCIM, iPhone и карта: устройство/DCIM). У телефона по MTP
+/// (gvfs: `mtp:host=…`) просматривается весь накопитель с этой папкой.
 #[cfg(target_os = "linux")]
 fn devices_in(base: &Path, kind: SourceKind, name: impl Fn(&str) -> String) -> Vec<Source> {
     let Ok(entries) = std::fs::read_dir(base) else {
@@ -130,11 +137,16 @@ fn devices_in(base: &Path, kind: SourceKind, name: impl Fn(&str) -> String) -> V
         .filter(|e| e.path().is_dir())
         .map(|e| {
             let dir_name = e.file_name().to_string_lossy().into_owned();
+            let mtp = dir_name.starts_with("mtp:");
             Source {
                 name: name(&dir_name),
                 kind,
                 roots: find_dcim(&e.path(), 2)
                     .into_iter()
+                    .map(|dcim| match dcim.parent() {
+                        Some(storage) if mtp => storage.to_path_buf(),
+                        _ => dcim,
+                    })
                     .map(Location::Path)
                     .collect(),
             }
@@ -303,6 +315,17 @@ fn skipped_name(name: &str) -> bool {
     name.starts_with('.') || name.eq_ignore_ascii_case("thumbnails")
 }
 
+/// Файл, которым Android прячет папку (со всем, что в ней) из галереи: кэш мессенджеров,
+/// временные файлы приложений.
+const NOMEDIA: &str = ".nomedia";
+
+/// Папки, которых нет в галерее телефона: служебные папки приложений в `Android` (кроме
+/// `media`, где фото и видео WhatsApp) и наклейки мессенджеров.
+fn skipped_dir(parent: &str, name: &str) -> bool {
+    (parent.eq_ignore_ascii_case("Android") && !name.eq_ignore_ascii_case("media"))
+        || name.to_lowercase().ends_with("stickers")
+}
+
 /// «ГГГГ-ММ» по времени изменения файла.
 fn month_folder(meta: &std::fs::Metadata) -> String {
     let secs = meta
@@ -326,7 +349,18 @@ fn walk_local(root: &Path, cancel: &AtomicBool, out: &mut Vec<Found>) -> Result<
     let walker = walkdir::WalkDir::new(root)
         .follow_links(false)
         .into_iter()
-        .filter_entry(|e| e.depth() == 0 || !skipped_name(&e.file_name().to_string_lossy()));
+        .filter_entry(|e| {
+            if e.depth() == 0 {
+                return true;
+            }
+            let name = e.file_name().to_string_lossy();
+            if !e.file_type().is_dir() {
+                return !skipped_name(&name);
+            }
+            let parent = e.path().parent().and_then(Path::file_name);
+            let parent = parent.map(|p| p.to_string_lossy()).unwrap_or_default();
+            !skipped_name(&name) && !skipped_dir(&parent, &name) && !e.path().join(NOMEDIA).exists()
+        });
     for entry in walker.flatten() {
         if cancel.load(Ordering::Relaxed) {
             return Err(Error::Cancelled);
@@ -589,12 +623,12 @@ fn jpeg_exif(head: &[u8]) -> Option<&[u8]> {
 
 #[cfg(target_os = "linux")]
 mod kio {
-    use std::sync::Mutex;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::{Condvar, Mutex};
 
     use super::*;
 
-    /// Сведения о файле по MTP — по 0,3 с на запуск `kioclient`, поэтому параллельно.
+    /// Списки папок и сведения о файлах по MTP — по 0,3 с на запуск `kioclient`, поэтому
+    /// параллельно (больше 8 не быстрее: телефон отвечает по очереди).
     const PARALLEL: usize = 8;
 
     fn run(args: &[&str], limit: Duration, cancel: Option<&AtomicBool>) -> Option<String> {
@@ -669,7 +703,8 @@ mod kio {
         Some(format!("{year}-{:02}", month + 1))
     }
 
-    /// Android-телефоны, которые KDE видит по MTP: устройство → накопители → `DCIM`.
+    /// Android-телефоны, которые KDE видит по MTP: устройство → накопители. Накопитель,
+    /// который не открывается или пуст, — телефон ещё не разрешил доступ.
     pub(super) fn mtp_sources() -> Vec<Source> {
         let Some(devices) = ls("mtp:/") else {
             return Vec::new();
@@ -681,15 +716,9 @@ mod kio {
                 let roots = ls(&base)
                     .unwrap_or_default()
                     .into_iter()
-                    .flat_map(|storage| {
-                        let storage = child(&base, &storage);
-                        ls(&storage)
-                            .unwrap_or_default()
-                            .into_iter()
-                            .filter(|n| n.eq_ignore_ascii_case("DCIM"))
-                            .map(move |n| Location::Kio(child(&storage, &n)))
-                            .collect::<Vec<_>>()
-                    })
+                    .map(|storage| child(&base, &storage))
+                    .filter(|storage| ls(storage).is_some_and(|names| !names.is_empty()))
+                    .map(Location::Kio)
                     .collect();
                 Source {
                     name: device,
@@ -700,67 +729,122 @@ mod kio {
             .collect()
     }
 
-    /// Обход папки на телефоне. Сведения запрашиваются только у папок (без расширения)
-    /// и у фото и видео: остальное не нужно.
+    /// Стоит ли спрашивать сведения: фото, видео или, похоже, папка. `kioclient ls` не
+    /// отличает папки от файлов, а у папок бывают точки в имени (`com.whatsapp`): у файла
+    /// расширение — до четырёх букв и цифр.
+    pub(super) fn worth_stat(name: &str) -> bool {
+        match Path::new(name).extension().and_then(|e| e.to_str()) {
+            None => true,
+            Some(ext) => {
+                is_media(name) || ext.len() > 4 || !ext.chars().all(|c| c.is_ascii_alphanumeric())
+            }
+        }
+    }
+
+    enum Task {
+        List(String),
+        Stat { url: String, name: String },
+    }
+
+    /// Обход папки на телефоне: общая очередь «список папки» и «сведения о файле», которую
+    /// разбирают `PARALLEL` потоков. Долгий список (кэш мессенджера на десятки тысяч
+    /// файлов читается по MTP полминуты) не задерживает остальное. Сведения
+    /// запрашиваются только у фото, видео и папок.
     pub(super) fn walk(
         root: &str,
         cancel: &AtomicBool,
         progress: &(impl Fn(usize) + Sync),
         out: &mut Vec<Found>,
     ) -> Result<()> {
-        let mut queue = vec![root.to_string()];
-        let mut first = true;
-        while let Some(dir) = queue.pop() {
-            if cancel.load(Ordering::Relaxed) {
-                return Err(Error::Cancelled);
-            }
-            let Some(names) = ls(&dir) else {
-                if first {
-                    return Err(Error::Invalid(
-                        "телефон не отвечает: разблокируйте его и выберите «Передача файлов»"
-                            .into(),
-                    ));
-                }
-                continue;
-            };
-            first = false;
-            let wanted: Vec<String> = names
-                .into_iter()
-                .filter(|n| !skipped_name(n))
-                .filter(|n| is_media(n) || Path::new(n).extension().is_none())
-                .collect();
-            let stats: Mutex<Vec<Option<Stat>>> =
-                Mutex::new((0..wanted.len()).map(|_| None).collect());
-            let next = AtomicUsize::new(0);
-            std::thread::scope(|s| {
-                for _ in 0..PARALLEL.min(wanted.len()) {
-                    s.spawn(|| {
-                        loop {
-                            let i = next.fetch_add(1, Ordering::Relaxed);
-                            if i >= wanted.len() || cancel.load(Ordering::Relaxed) {
-                                return;
-                            }
-                            let st = stat(&child(&dir, &wanted[i]));
-                            stats.lock().unwrap()[i] = st;
+        // Очередь и сколько задач сейчас в работе: пусто и никто не работает — конец.
+        let state = Mutex::new((vec![Task::List(root.to_string())], 0usize));
+        let wake = Condvar::new();
+        let found = Mutex::new(std::mem::take(out));
+        let root_failed = AtomicBool::new(false);
+        let process = |task: Task| -> Vec<Task> {
+            match task {
+                Task::List(dir) => {
+                    // Скрытую папку не читать вовсе: у кэша мессенджера список — полминуты,
+                    // а проверка `.nomedia` — секунда.
+                    if dir != root && stat(&child(&dir, NOMEDIA)).is_some() {
+                        return Vec::new();
+                    }
+                    let Some(names) = ls(&dir) else {
+                        if dir == root {
+                            root_failed.store(true, Ordering::Relaxed);
                         }
-                    });
+                        return Vec::new();
+                    };
+                    if names.iter().any(|n| n == NOMEDIA) {
+                        return Vec::new();
+                    }
+                    let parent = dir.rsplit('/').next().unwrap_or_default();
+                    names
+                        .into_iter()
+                        .filter(|n| !skipped_name(n) && !skipped_dir(parent, n) && worth_stat(n))
+                        .map(|name| Task::Stat {
+                            url: child(&dir, &name),
+                            name,
+                        })
+                        .collect()
                 }
-            });
-            for (name, st) in wanted.into_iter().zip(stats.into_inner().unwrap()) {
-                let Some(st) = st else { continue };
-                let url = child(&dir, &name);
-                if st.dir {
-                    queue.push(url);
-                } else if is_media(&name) {
-                    out.push(Found {
-                        location: Location::Kio(url),
-                        name,
-                        size: st.size,
-                        month: st.month,
-                    });
-                }
+                Task::Stat { url, name } => match stat(&url) {
+                    Some(st) if st.dir => vec![Task::List(url)],
+                    Some(st) if is_media(&name) => {
+                        let mut found = found.lock().unwrap();
+                        found.push(Found {
+                            location: Location::Kio(url),
+                            name,
+                            size: st.size,
+                            month: st.month,
+                        });
+                        progress(found.len());
+                        Vec::new()
+                    }
+                    _ => Vec::new(),
+                },
             }
-            progress(out.len());
+        };
+        std::thread::scope(|s| {
+            for _ in 0..PARALLEL {
+                s.spawn(|| {
+                    loop {
+                        let task = {
+                            let mut st = state.lock().unwrap();
+                            loop {
+                                if cancel.load(Ordering::Relaxed) {
+                                    wake.notify_all();
+                                    return;
+                                }
+                                if let Some(task) = st.0.pop() {
+                                    st.1 += 1;
+                                    break task;
+                                }
+                                if st.1 == 0 {
+                                    wake.notify_all();
+                                    return;
+                                }
+                                // С таймаутом — чтобы заметить отмену.
+                                st = wake.wait_timeout(st, Duration::from_millis(200)).unwrap().0;
+                            }
+                        };
+                        let more = process(task);
+                        let mut st = state.lock().unwrap();
+                        st.0.extend(more);
+                        st.1 -= 1;
+                        wake.notify_all();
+                    }
+                });
+            }
+        });
+        *out = found.into_inner().unwrap();
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
+        if root_failed.load(Ordering::Relaxed) {
+            return Err(Error::Invalid(
+                "телефон не отвечает: разблокируйте его и выберите «Передача файлов»".into(),
+            ));
         }
         Ok(())
     }
@@ -891,6 +975,54 @@ mod tests {
                 .to_string_lossy()
                 .ends_with("PXL_1_1.jpg")
         );
+    }
+
+    #[test]
+    fn whole_android_storage_like_phone_gallery() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dir.path().join("Внутренний общий накопитель");
+        let wa = storage.join("Android/media/com.whatsapp/WhatsApp/Media");
+        write(&storage.join("DCIM/Camera/IMG_1.jpg"), b"1");
+        write(&storage.join("Pictures/Telegram/tg.jpg"), b"2");
+        write(&storage.join("Movies/VK/vk.mp4"), b"3");
+        write(&wa.join("WhatsApp Images/IMG-wa.jpg"), b"4");
+        // Галерея телефона этого не показывает.
+        write(&wa.join("WhatsApp Images/Private/.nomedia"), b"");
+        write(&wa.join("WhatsApp Images/Private/IMG-hidden.jpg"), b"x");
+        write(&wa.join("WhatsApp Stickers/s.webp"), b"x");
+        write(
+            &storage.join("Download/AyuGram/Saved Attachments/.nomedia"),
+            b"",
+        );
+        write(
+            &storage.join("Download/AyuGram/Saved Attachments/a.jpg"),
+            b"x",
+        );
+        write(&storage.join("Android/data/com.app/cache/c.jpg"), b"x");
+
+        let cancel = AtomicBool::new(false);
+        let mut found = Vec::new();
+        walk_local(&storage, &cancel, &mut found).unwrap();
+        let mut names: Vec<_> = found.into_iter().map(|f| f.name).collect();
+        names.sort();
+        assert_eq!(names, ["IMG-wa.jpg", "IMG_1.jpg", "tg.jpg", "vk.mp4"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn asks_kio_only_about_media_and_folders() {
+        for name in [
+            "IMG_1.jpg",
+            "VID.MP4",
+            "Camera",
+            "com.whatsapp",
+            "Mr. Smith",
+        ] {
+            assert!(kio::worth_stat(name), "{name}");
+        }
+        for name in ["notes.txt", "app.apk", "song.flac", "doc.pdf"] {
+            assert!(!kio::worth_stat(name), "{name}");
+        }
     }
 
     #[cfg(target_os = "linux")]
