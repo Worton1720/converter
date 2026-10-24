@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/core", "crates/cli", "app/src-tauri"]
 
 [workspace.package]
-version = "0.5.1"
+version = "0.5.2"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Worton1720/converter"
