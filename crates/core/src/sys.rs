@@ -54,6 +54,47 @@ pub fn is_cloud_placeholder(_meta: &Metadata) -> bool {
     false
 }
 
+/// Команда для программы системы (kioclient, busctl…). В AppImage окружение указывает внутрь
+/// образа (`LD_LIBRARY_PATH`, `QT_PLUGIN_PATH`, `PATH`…): системная программа с чужими
+/// библиотеками падает (`liblzma.so.5: version XZ_5.4 not found`). Части путей, ведущие
+/// в образ, убираются; переменная, от которой ничего не осталось, удаляется.
+pub fn host_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut cmd = Command::new(program);
+    if let Some(appdir) = std::env::var_os("APPDIR") {
+        for (key, value) in host_env_fixes(&appdir.to_string_lossy(), std::env::vars_os()) {
+            match value {
+                Some(v) => cmd.env(key, v),
+                None => cmd.env_remove(key),
+            };
+        }
+    }
+    cmd
+}
+
+/// Что поменять в окружении: `(имя, None)` — удалить, `(имя, Some)` — новое значение.
+fn host_env_fixes(
+    appdir: &str,
+    vars: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> Vec<(std::ffi::OsString, Option<String>)> {
+    let appdir = appdir.trim_end_matches('/');
+    if appdir.is_empty() {
+        return Vec::new();
+    }
+    let inside = |p: &str| p == appdir || p.starts_with(&format!("{appdir}/"));
+    vars.filter_map(|(key, value)| {
+        let value = value.to_string_lossy().into_owned();
+        if !value.contains(appdir) || key == "APPDIR" || key == "APPIMAGE" {
+            return None;
+        }
+        let kept: Vec<&str> = value
+            .split(':')
+            .filter(|p| !p.is_empty() && !inside(p))
+            .collect();
+        Some((key, (!kept.is_empty()).then(|| kept.join(":"))))
+    })
+    .collect()
+}
+
 /// Привязывает ffmpeg к приложению и выставляет приоритет при запуске.
 pub fn spawn(cmd: &mut Command, priority: Priority) -> std::io::Result<Child> {
     configure_child(cmd, priority);
@@ -439,6 +480,34 @@ mod imp {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn host_env_drops_appimage_paths() {
+        let v = |k: &str, v: &str| (std::ffi::OsString::from(k), std::ffi::OsString::from(v));
+        let mut fixes = host_env_fixes(
+            "/tmp/.mount_X/",
+            [
+                v(
+                    "LD_LIBRARY_PATH",
+                    "/tmp/.mount_X/usr/lib/:/tmp/.mount_X/usr/lib64",
+                ),
+                v("PATH", "/tmp/.mount_X/usr/bin/:/usr/bin:/bin"),
+                v("HOME", "/home/u"),
+                v("APPDIR", "/tmp/.mount_X"),
+                v("OTHER", "/tmp/.mount_Xother"),
+            ]
+            .into_iter(),
+        );
+        fixes.sort();
+        assert_eq!(
+            fixes,
+            [
+                ("LD_LIBRARY_PATH".into(), None),
+                ("OTHER".into(), Some("/tmp/.mount_Xother".into())),
+                ("PATH".into(), Some("/usr/bin:/bin".into())),
+            ]
+        );
+    }
+
     use super::*;
 
     #[test]
