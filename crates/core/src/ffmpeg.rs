@@ -86,7 +86,7 @@ impl Tools {
     }
 
     pub fn ffmpeg_cmd(&self) -> Command {
-        Command::new(&self.ffmpeg)
+        crate::sys::host_command(&self.ffmpeg)
     }
 
     /// Ключ для кэша детекта HW: путь, размер и время изменения бинарника + версия.
@@ -145,7 +145,7 @@ fn find_in_path(name: &str) -> Option<PathBuf> {
 }
 
 fn version_line(ffmpeg: &Path) -> Option<String> {
-    let mut cmd = Command::new(ffmpeg);
+    let mut cmd = crate::sys::host_command(ffmpeg);
     cmd.arg("-hide_banner").arg("-version");
     let out = output(&mut cmd).ok()?;
     out.status.success().then(|| {

@@ -150,7 +150,7 @@ struct RawStream {
 }
 
 pub fn probe(tools: &Tools, path: &Path) -> Result<VideoInfo> {
-    let mut cmd = std::process::Command::new(&tools.ffprobe);
+    let mut cmd = crate::sys::host_command(&tools.ffprobe);
     cmd.args([
         "-v",
         "error",

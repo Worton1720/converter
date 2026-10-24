@@ -243,7 +243,7 @@ fn run_with_timeout(
     limit: Duration,
     cancel: Option<&AtomicBool>,
 ) -> Option<String> {
-    let mut child = std::process::Command::new(program)
+    let mut child = crate::sys::host_command(program)
         .args(args)
         // Даты в выводе kioclient — на английском при любом языке системы.
         .env("LC_TIME", "C.UTF-8")
@@ -767,7 +767,7 @@ mod kio {
 
     /// Первые `limit` байт файла с телефона (`kioclient cat`, затем процесс прерывается).
     pub(super) fn head(url: &str, limit: usize) -> Option<Vec<u8>> {
-        let mut child = std::process::Command::new("kioclient")
+        let mut child = crate::sys::host_command("kioclient")
             .args(["--noninteractive", "--platform", "offscreen", "cat", url])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
