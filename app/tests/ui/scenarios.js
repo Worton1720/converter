@@ -253,6 +253,11 @@
     expect(dialog().innerText.includes("2 фото"), `не то число файлов: ${dialog().innerText}`);
     expect(dialog().innerText.includes("С телефона ничего не удалится"), "нет обещания не удалять");
     checkElderlyRules("мастер: галерея");
+    // Куда сохранить — в нижней строке, слева от «Перенести всё».
+    const go = [...dialog().querySelectorAll("button")].find((x) => x.textContent.trim() === "Перенести всё");
+    const where = [...dialog().querySelectorAll("p")].find((x) => x.textContent.startsWith("Сохранить в папку"));
+    expect(go && where && go.parentElement.contains(where), "папка не рядом с кнопкой «Перенести всё»");
+    expect(where.getBoundingClientRect().right <= go.getBoundingClientRect().left, "папка не слева от кнопки");
     expect(text().includes("Выбрано 2 из 2"), "по умолчанию выбрано не всё");
     expect(button("Выбрать весь месяц") || button("Снять весь месяц"), "нет выбора месяца");
     // Снять один снимок нажатием — переносится только выбранное.

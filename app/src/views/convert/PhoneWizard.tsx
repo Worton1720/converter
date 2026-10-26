@@ -260,24 +260,30 @@ export function PhoneWizard({ open: isOpen, onClose }: { open: boolean; onClose:
               <Button onClick={() => device && dest && void plan(device.index, dest)}>Искать снова</Button>
             </div>
           )}
-          <div className="space-y-2 rounded-lg bg-sunken px-4 py-3">
-            <p className="text-[16px] text-muted">Сохранить в папку (внутри — по месяцам):</p>
-            <p className="text-[16px] break-all">{dest}</p>
-            <Button onClick={() => void changeDest()}>Выбрать другую папку</Button>
-          </div>
           <p className="text-[16px] text-muted">С телефона ничего не удалится.</p>
         </div>
       );
-      footer =
-        p.count > 0 ? (
-          <Button variant="primary" size="lg" disabled={picked.size === 0} onClick={() => void start(p)}>
-            {picked.size === p.count ? "Перенести всё" : `Перенести выбранные (${picked.size})`}
-          </Button>
-        ) : (
-          <Button variant="primary" onClick={onClose}>
-            Готово
-          </Button>
-        );
+      // Куда сохранить — слева от кнопки переноса: видно в момент решения.
+      footer = (
+        <>
+          <div className="mr-auto flex min-w-0 flex-1 flex-wrap items-center gap-3">
+            <div className="min-w-0">
+              <p className="text-[16px] text-muted">Сохранить в папку (внутри — по месяцам):</p>
+              <p className="text-[16px] break-all">{dest}</p>
+            </div>
+            <Button onClick={() => void changeDest()}>Выбрать другую папку</Button>
+          </div>
+          {p.count > 0 ? (
+            <Button variant="primary" size="lg" disabled={picked.size === 0} onClick={() => void start(p)}>
+              {picked.size === p.count ? "Перенести всё" : `Перенести выбранные (${picked.size})`}
+            </Button>
+          ) : (
+            <Button variant="primary" onClick={onClose}>
+              Готово
+            </Button>
+          )}
+        </>
+      );
       break;
     }
     case "copying":
