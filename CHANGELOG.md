@@ -3,7 +3,7 @@
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/), версии — [SemVer](https://semver.org/lang/ru/).
 Раздел выпуска попадает в его описание на GitHub (`.github/workflows/release.yml`).
 
-## [Не выпущено]
+## [0.5.3] — 2026-10-26
 
 ### Улучшено
 
