@@ -92,6 +92,9 @@ pub struct Settings {
     pub scan_hidden: bool,
     /// Проверять при запуске, не вышла ли новая версия.
     pub check_updates: bool,
+    /// Запоминать сведения о файлах телефона: повторный поиск в мастере переноса быстрее
+    /// (`import::memory_path`).
+    pub remember_phone: bool,
 }
 
 impl Default for Settings {
@@ -110,6 +113,7 @@ impl Default for Settings {
             scan_recursive: true,
             scan_hidden: false,
             check_updates: true,
+            remember_phone: true,
         }
     }
 }

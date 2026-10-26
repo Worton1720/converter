@@ -122,6 +122,12 @@ export function SettingsDialog({ open: isOpen, onClose }: { open: boolean; onClo
             label="Не давать компьютеру уснуть"
             hint="Пока программа работает с файлами"
           />
+          <Switch
+            checked={settings.remember_phone ?? true}
+            onChange={(remember_phone) => updateSettings((s) => ({ ...s, remember_phone }))}
+            label="Запоминать, что есть на телефоне"
+            hint="В следующий раз снимки на телефоне найдутся быстрее. Если выключить — запомненное сотрётся"
+          />
           <UpdateSettings />
         </section>
 

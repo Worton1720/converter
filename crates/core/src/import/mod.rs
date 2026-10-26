@@ -14,10 +14,15 @@
 //! С телефона ничего не удаляется. Файлы раскладываются по папкам «ГГГГ-ММ» по дате
 //! изменения (у снимков с телефона это время съёмки — дату внутри файла по MTP читать
 //! дорого). Уже перенесённое (то же имя и размер) пропускается — перенос можно повторять.
+//!
+//! Поиск отдаёт новое по мере нахождения (галерея мастера наполняется сразу), `DCIM` —
+//! первой. По желанию сведения о файлах телефона запоминаются ([`plan`], `memory`), и
+//! повторный поиск спрашивает телефон только о новом.
 
 use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::UNIX_EPOCH;
 #[cfg(target_os = "linux")]
@@ -247,7 +252,6 @@ fn kio_fuse_mount(url: &str) -> Option<PathBuf> {
 }
 
 /// Запуск внешней программы с пределом времени; `cancel` — прервать по просьбе человека.
-/// Вывод читается в отдельном потоке: большой список файлов не должен застрять в трубе.
 #[cfg(target_os = "linux")]
 fn run_with_timeout(
     program: &str,
@@ -255,6 +259,22 @@ fn run_with_timeout(
     limit: Duration,
     cancel: Option<&AtomicBool>,
 ) -> Option<String> {
+    run_watched(program, args, limit, cancel, &|| {})
+}
+
+/// То же, `tick` — раз в 50 мс, пока программа работает (прогресс копирования). Вывод
+/// читается в отдельном потоке: большой список файлов не должен застрять в трубе; его конец —
+/// знак, что программа завершается, — ждать её дальше без опроса раз в 50 мс (на сотнях
+/// запусков `kioclient` это заметно).
+#[cfg(target_os = "linux")]
+fn run_watched(
+    program: &str,
+    args: &[&str],
+    limit: Duration,
+    cancel: Option<&AtomicBool>,
+    tick: &dyn Fn(),
+) -> Option<String> {
+    use std::sync::mpsc::RecvTimeoutError;
     let mut child = crate::sys::host_command(program)
         .args(args)
         // Даты в выводе kioclient — на английском при любом языке системы.
@@ -264,23 +284,37 @@ fn run_with_timeout(
         .spawn()
         .ok()?;
     let mut stdout = child.stdout.take()?;
-    let reader = std::thread::spawn(move || {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut out = String::new();
-        stdout.read_to_string(&mut out).map(|_| out)
+        let _ = tx.send(stdout.read_to_string(&mut out).map(|_| out));
     });
     let start = Instant::now();
+    let over = || cancel.is_some_and(|c| c.load(Ordering::Relaxed)) || start.elapsed() > limit;
+    let mut out = None;
     loop {
-        let stop = cancel.is_some_and(|c| c.load(Ordering::Relaxed));
+        if out.is_none() {
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(read) => out = Some(read),
+                Err(RecvTimeoutError::Timeout) => tick(),
+                Err(RecvTimeoutError::Disconnected) => out = Some(Ok(String::new())),
+            }
+        }
         match child.try_wait() {
-            Ok(Some(status)) if status.success() => return reader.join().ok()?.ok(),
-            Ok(Some(_)) => return None,
-            Ok(None) if stop || start.elapsed() > limit => {
+            Ok(Some(status)) if status.success() => {
+                return match out {
+                    Some(read) => read.ok(),
+                    None => rx.recv().ok()?.ok(),
+                };
+            }
+            Ok(Some(_)) | Err(_) => return None,
+            Ok(None) if over() => {
                 let _ = child.kill();
                 let _ = child.wait();
                 return None;
             }
-            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-            Err(_) => return None,
+            Ok(None) if out.is_some() => std::thread::sleep(Duration::from_millis(2)),
+            Ok(None) => {}
         }
     }
 }
@@ -301,6 +335,8 @@ pub struct ImportPlan {
     /// Уже перенесены раньше (то же имя и размер в папке месяца).
     pub already: usize,
     pub bytes: u64,
+    /// Сколько папок и файлов телефон не отдал и со второго раза — найдено не всё.
+    pub unread: usize,
 }
 
 fn is_media(name: &str) -> bool {
@@ -345,9 +381,15 @@ struct Found {
     month: String,
 }
 
-fn walk_local(root: &Path, cancel: &AtomicBool, out: &mut Vec<Found>) -> Result<()> {
+/// `DCIM` — первой: снимки камеры появляются в галерее мастера раньше остального.
+fn dcim_first(name: &std::ffi::OsStr) -> (bool, &std::ffi::OsStr) {
+    (!name.eq_ignore_ascii_case("DCIM"), name)
+}
+
+fn walk_local(root: &Path, cancel: &AtomicBool, add: &(dyn Fn(Found) + Sync)) -> Result<()> {
     let walker = walkdir::WalkDir::new(root)
         .follow_links(false)
+        .sort_by(|a, b| dcim_first(a.file_name()).cmp(&dcim_first(b.file_name())))
         .into_iter()
         .filter_entry(|e| {
             if e.depth() == 0 {
@@ -370,7 +412,7 @@ fn walk_local(root: &Path, cancel: &AtomicBool, out: &mut Vec<Found>) -> Result<
             continue;
         }
         let Ok(meta) = entry.metadata() else { continue };
-        out.push(Found {
+        add(Found {
             location: Location::Path(entry.path().to_path_buf()),
             name,
             size: meta.len(),
@@ -380,49 +422,88 @@ fn walk_local(root: &Path, cancel: &AtomicBool, out: &mut Vec<Found>) -> Result<
     Ok(())
 }
 
+/// Где запоминаются сведения о файлах телефона (параметр `memory` у [`plan`]).
+pub fn memory_path() -> PathBuf {
+    crate::paths::cache_dir().join("phone-memory.json")
+}
+
+/// Ход поиска для [`plan`]: сколько фото и видео на устройстве просмотрено и, если нашлось
+/// новое, — оно с номером в плане (номера не меняются, план только растёт).
+pub struct Scan<'a> {
+    pub seen: usize,
+    pub new: Option<(usize, &'a ImportItem)>,
+}
+
 /// Что перенести из папок `roots` в `dest`: новые файлы, уже перенесённые — пропустить.
-/// Прогресс — сколько файлов на устройстве уже просмотрено (по MTP это долго).
+/// `memory` — файл, где запоминаются сведения о файлах телефона (`None` — не запоминать).
 pub fn plan(
     roots: &[Location],
     dest: &Path,
     cancel: &AtomicBool,
-    progress: impl Fn(usize) + Sync,
+    memory: Option<&Path>,
+    progress: impl Fn(Scan<'_>) + Sync,
 ) -> Result<ImportPlan> {
-    let mut found = Vec::new();
-    for root in roots {
-        match root {
-            Location::Path(p) => walk_local(p, cancel, &mut found)?,
-            #[cfg(target_os = "linux")]
-            Location::Kio(url) => kio::walk(url, cancel, &progress, &mut found)?,
-            #[cfg(not(target_os = "linux"))]
-            Location::Kio(_) => {}
-        }
-        progress(found.len());
+    struct Acc {
+        plan: ImportPlan,
+        taken: HashSet<PathBuf>,
+        seen: usize,
     }
-    let mut plan = ImportPlan::default();
-    let mut taken: HashSet<PathBuf> = HashSet::new();
-    for f in found {
+    let acc = Mutex::new(Acc {
+        plan: ImportPlan::default(),
+        taken: HashSet::new(),
+        seen: 0,
+    });
+    let add = |f: Found| {
+        let mut acc = acc.lock().unwrap();
+        acc.seen += 1;
         let folder = dest.join(&f.month);
         let mut target = folder.join(&f.name);
         // То же имя и размер — уже перенесён раньше (или дублируется на устройстве).
         if std::fs::metadata(&target).is_ok_and(|m| m.len() == f.size) {
-            plan.already += 1;
-            continue;
+            acc.plan.already += 1;
+            progress(Scan {
+                seen: acc.seen,
+                new: None,
+            });
+            return;
         }
         let mut n = 1;
-        while target.exists() || taken.contains(&target) {
+        while target.exists() || acc.taken.contains(&target) {
             target = fs_ops::with_suffix(&folder.join(&f.name), n);
             n += 1;
         }
-        taken.insert(target.clone());
-        plan.bytes += f.size;
-        plan.items.push(ImportItem {
+        acc.taken.insert(target.clone());
+        acc.plan.bytes += f.size;
+        acc.plan.items.push(ImportItem {
             source: f.location,
             dest: target,
             size: f.size,
         });
+        let index = acc.plan.items.len() - 1;
+        progress(Scan {
+            seen: acc.seen,
+            new: Some((index, &acc.plan.items[index])),
+        });
+    };
+    #[cfg(target_os = "linux")]
+    let remembered = kio::Remembered::open(memory);
+    #[cfg(not(target_os = "linux"))]
+    let _ = memory;
+    for root in roots {
+        match root {
+            Location::Path(p) => walk_local(p, cancel, &add)?,
+            #[cfg(target_os = "linux")]
+            Location::Kio(url) => {
+                let unread = kio::walk(url, cancel, &remembered, &add)?;
+                acc.lock().unwrap().plan.unread += unread;
+            }
+            #[cfg(not(target_os = "linux"))]
+            Location::Kio(_) => {}
+        }
     }
-    Ok(plan)
+    #[cfg(target_os = "linux")]
+    remembered.save(roots);
+    Ok(acc.into_inner().unwrap().plan)
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -436,32 +517,67 @@ pub struct ImportReport {
 
 /// Переносит по плану: копия во временный файл, проверка размера, время изменения как у
 /// исходника, затем — настоящее имя. Прервать можно в любой момент: недописанный файл
-/// удаляется. Прогресс — `(файлов, байт)`.
+/// удаляется. Мелкие файлы с телефона — пачками ([`batch_len`]). Прогресс — `(файлов, байт)`.
 pub fn run(plan: &ImportPlan, cancel: &AtomicBool, progress: impl Fn(usize, u64)) -> ImportReport {
     let mut report = ImportReport::default();
-    for item in &plan.items {
+    let mut rest = &plan.items[..];
+    while !rest.is_empty() {
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        match copy_one(item, cancel, |b| progress(report.copied, report.bytes + b)) {
-            Ok(()) => {
-                report.copied += 1;
-                report.bytes += item.size;
-                report.outputs.push(item.dest.clone());
+        let (batch, tail) = rest.split_at(batch_len(rest));
+        rest = tail;
+        let (copied, bytes) = (report.copied, report.bytes);
+        let results = copy_batch(batch, cancel, &|b| progress(copied, bytes + b));
+        let mut stop = false;
+        for (item, result) in batch.iter().zip(results) {
+            match result {
+                Ok(target) => {
+                    report.copied += 1;
+                    report.bytes += item.size;
+                    report.outputs.push(target);
+                }
+                Err(Error::Cancelled) => stop = true,
+                Err(e) => report.failed.push((item.source.clone(), e.to_string())),
             }
-            Err(Error::Cancelled) => break,
-            Err(e) => report.failed.push((item.source.clone(), e.to_string())),
         }
         progress(report.copied, report.bytes);
+        if stop {
+            break;
+        }
     }
     report
+}
+
+/// Сколько первых файлов скопировать одной командой: у телефона на KDE каждый запуск
+/// `kioclient` стоит ~50 мс сверх самого копирования (снимки экрана пачкой — втрое быстрее).
+fn batch_len(items: &[ImportItem]) -> usize {
+    #[cfg(target_os = "linux")]
+    if matches!(items[0].source, Location::Kio(_)) {
+        return kio::batch_len(items);
+    }
+    let _ = items;
+    1
+}
+
+/// Результат по каждому файлу пачки — путь, под которым он лёг.
+fn copy_batch(
+    batch: &[ImportItem],
+    cancel: &AtomicBool,
+    progress: &dyn Fn(u64),
+) -> Vec<Result<PathBuf>> {
+    #[cfg(target_os = "linux")]
+    if batch.len() > 1 {
+        return kio::copy_batch(batch, cancel, progress);
+    }
+    vec![copy_one(&batch[0], cancel, progress)]
 }
 
 fn copy_local(
     source: &Path,
     tmp: &Path,
     cancel: &AtomicBool,
-    progress: impl Fn(u64),
+    progress: &dyn Fn(u64),
 ) -> Result<()> {
     let mut from = std::fs::File::open(source).at(source)?;
     let mut to = std::fs::File::create(tmp).at(tmp)?;
@@ -483,42 +599,48 @@ fn copy_local(
     fs_ops::copy_mtime(source, tmp)
 }
 
-fn copy_one(item: &ImportItem, cancel: &AtomicBool, progress: impl Fn(u64)) -> Result<()> {
+fn copy_one(item: &ImportItem, cancel: &AtomicBool, progress: &dyn Fn(u64)) -> Result<PathBuf> {
     let dir = item.dest.parent().expect("у файла назначения есть папка");
     std::fs::create_dir_all(dir).at(dir)?;
     let name = item.dest.file_name().unwrap_or_default().to_string_lossy();
     let tmp = dir.join(format!(".{name}.import-{}", std::process::id()));
-    let result = (|| -> Result<()> {
+    let result = (|| -> Result<PathBuf> {
         match &item.source {
             Location::Path(p) => copy_local(p, &tmp, cancel, progress)?,
             // KIO сохраняет время изменения сам.
             #[cfg(target_os = "linux")]
-            Location::Kio(url) => kio::copy(url, &tmp, item.size, cancel)?,
+            Location::Kio(url) => kio::copy(url, &tmp, item.size, cancel, progress)?,
             #[cfg(not(target_os = "linux"))]
             Location::Kio(_) => {
                 return Err(Error::Invalid("адреса KIO есть только на Linux".into()));
             }
         }
-        let done = std::fs::metadata(&tmp).at(&tmp)?.len();
-        if done != item.size {
-            return Err(Error::Verify(format!(
-                "скопировано {done} байт из {} — файл на устройстве читается не до конца",
-                item.size
-            )));
-        }
-        // Имя могло появиться за время переноса — тогда с номером, не перезаписывая.
-        let mut target = item.dest.clone();
-        let mut n = 1;
-        while target.exists() {
-            target = fs_ops::with_suffix(&item.dest, n);
-            n += 1;
-        }
-        std::fs::rename(&tmp, &target).at(&target)
+        finish(&tmp, item)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
     result
+}
+
+/// Скопированный во временный файл `tmp` — проверить размер и дать настоящее имя.
+fn finish(tmp: &Path, item: &ImportItem) -> Result<PathBuf> {
+    let done = std::fs::metadata(tmp).at(tmp)?.len();
+    if done != item.size {
+        return Err(Error::Verify(format!(
+            "скопировано {done} байт из {} — файл на устройстве читается не до конца",
+            item.size
+        )));
+    }
+    // Имя могло появиться за время переноса — тогда с номером, не перезаписывая.
+    let mut target = item.dest.clone();
+    let mut n = 1;
+    while target.exists() {
+        target = fs_ops::with_suffix(&item.dest, n);
+        n += 1;
+    }
+    std::fs::rename(tmp, &target).at(&target)?;
+    Ok(target)
 }
 
 // ---------- превью для галереи мастера ----------
@@ -575,7 +697,7 @@ fn kio_preview(url: &str, size: u64) -> Option<PathBuf> {
         return None;
     }
     let tmp = dir.join(format!(".{}.{ext}", out.file_stem()?.to_string_lossy()));
-    kio::copy(url, &tmp, size, &AtomicBool::new(false)).ok()?;
+    kio::copy(url, &tmp, size, &AtomicBool::new(false), &|_| {}).ok()?;
     let img = match crate::media::detect(&tmp) {
         Some(crate::media::MediaKind::Image(kind)) => crate::thumb::preview(&tmp, kind, 320).ok(),
         _ => None,
@@ -619,285 +741,8 @@ fn jpeg_exif(head: &[u8]) -> Option<&[u8]> {
     None
 }
 
-// ---------- Android на KDE: KIO через kioclient ----------
-
 #[cfg(target_os = "linux")]
-mod kio {
-    use std::sync::{Condvar, Mutex};
-
-    use super::*;
-
-    /// Списки папок и сведения о файлах по MTP — по 0,3 с на запуск `kioclient`, поэтому
-    /// параллельно (больше 8 не быстрее: телефон отвечает по очереди).
-    const PARALLEL: usize = 8;
-
-    fn run(args: &[&str], limit: Duration, cancel: Option<&AtomicBool>) -> Option<String> {
-        let mut all = vec!["--noninteractive", "--platform", "offscreen"];
-        all.extend_from_slice(args);
-        run_with_timeout("kioclient", &all, limit, cancel)
-    }
-
-    /// Имена в папке; `None` — телефон не отвечает или `kioclient` нет (не KDE).
-    pub(super) fn ls(url: &str) -> Option<Vec<String>> {
-        let out = run(&["ls", url], Duration::from_secs(60), None)?;
-        Some(
-            out.lines()
-                .map(str::trim_end)
-                .filter(|l| !l.is_empty() && *l != "." && *l != "..")
-                .map(str::to_string)
-                .collect(),
-        )
-    }
-
-    /// Адрес вложенного элемента. `%`, `#` и `?` в имени иначе ломают адрес.
-    pub(super) fn child(url: &str, name: &str) -> String {
-        let name = name
-            .replace('%', "%25")
-            .replace('#', "%23")
-            .replace('?', "%3F");
-        format!("{}/{name}", url.trim_end_matches('/'))
-    }
-
-    pub(super) struct Stat {
-        pub dir: bool,
-        pub size: u64,
-        pub month: String,
-    }
-
-    fn stat(url: &str) -> Option<Stat> {
-        let out = run(&["stat", url], Duration::from_secs(30), None)?;
-        parse_stat(&out)
-    }
-
-    pub(super) fn parse_stat(out: &str) -> Option<Stat> {
-        let field = |key: &str| out.lines().find_map(|l| l.strip_prefix(key).map(str::trim));
-        Some(Stat {
-            // Восьмеричный тип st_mode, с ведущим нулём или без: `0040000` — папка.
-            dir: u32::from_str_radix(field("FILE_TYPE")?, 8).ok()? & 0o170000 == 0o040000,
-            size: field("SIZE").and_then(|v| v.parse().ok()).unwrap_or(0),
-            month: field("MODIFICATION_TIME")
-                .and_then(month_of)
-                .unwrap_or_else(|| "Без даты".into()),
-        })
-    }
-
-    /// «Sun Oct 18 15:15:22 2026» → «2026-10». Русские сокращения — на случай другого языка.
-    pub(super) fn month_of(time: &str) -> Option<String> {
-        const EN: [&str; 12] = [
-            "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
-        ];
-        const RU: [&str; 12] = [
-            "янв", "фев", "мар", "апр", "мая", "июн", "июл", "авг", "сен", "окт", "ноя", "дек",
-        ];
-        let words: Vec<String> = time.split_whitespace().map(str::to_lowercase).collect();
-        let year = words
-            .iter()
-            .find(|w| w.len() == 4 && w.chars().all(|c| c.is_ascii_digit()))?;
-        let month = words.iter().find_map(|w| {
-            let head: String = w.chars().take(3).collect();
-            EN.iter().position(|m| *m == head).or_else(|| {
-                RU.iter()
-                    .position(|m| *m == head || (*m == "мая" && head == "май"))
-            })
-        })?;
-        Some(format!("{year}-{:02}", month + 1))
-    }
-
-    /// Android-телефоны, которые KDE видит по MTP: устройство → накопители. Накопитель,
-    /// который не открывается или пуст, — телефон ещё не разрешил доступ.
-    pub(super) fn mtp_sources() -> Vec<Source> {
-        let Some(devices) = ls("mtp:/") else {
-            return Vec::new();
-        };
-        devices
-            .into_iter()
-            .map(|device| {
-                let base = child("mtp:/", &device);
-                let roots = ls(&base)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|storage| child(&base, &storage))
-                    .filter(|storage| ls(storage).is_some_and(|names| !names.is_empty()))
-                    .map(Location::Kio)
-                    .collect();
-                Source {
-                    name: device,
-                    kind: SourceKind::Phone,
-                    roots,
-                }
-            })
-            .collect()
-    }
-
-    /// Стоит ли спрашивать сведения: фото, видео или, похоже, папка. `kioclient ls` не
-    /// отличает папки от файлов, а у папок бывают точки в имени (`com.whatsapp`): у файла
-    /// расширение — до четырёх букв и цифр.
-    pub(super) fn worth_stat(name: &str) -> bool {
-        match Path::new(name).extension().and_then(|e| e.to_str()) {
-            None => true,
-            Some(ext) => {
-                is_media(name) || ext.len() > 4 || !ext.chars().all(|c| c.is_ascii_alphanumeric())
-            }
-        }
-    }
-
-    enum Task {
-        List(String),
-        Stat { url: String, name: String },
-    }
-
-    /// Обход папки на телефоне: общая очередь «список папки» и «сведения о файле», которую
-    /// разбирают `PARALLEL` потоков. Долгий список (кэш мессенджера на десятки тысяч
-    /// файлов читается по MTP полминуты) не задерживает остальное. Сведения
-    /// запрашиваются только у фото, видео и папок.
-    pub(super) fn walk(
-        root: &str,
-        cancel: &AtomicBool,
-        progress: &(impl Fn(usize) + Sync),
-        out: &mut Vec<Found>,
-    ) -> Result<()> {
-        // Очередь и сколько задач сейчас в работе: пусто и никто не работает — конец.
-        let state = Mutex::new((vec![Task::List(root.to_string())], 0usize));
-        let wake = Condvar::new();
-        let found = Mutex::new(std::mem::take(out));
-        let root_failed = AtomicBool::new(false);
-        let process = |task: Task| -> Vec<Task> {
-            match task {
-                Task::List(dir) => {
-                    // Скрытую папку не читать вовсе: у кэша мессенджера список — полминуты,
-                    // а проверка `.nomedia` — секунда.
-                    if dir != root && stat(&child(&dir, NOMEDIA)).is_some() {
-                        return Vec::new();
-                    }
-                    let Some(names) = ls(&dir) else {
-                        if dir == root {
-                            root_failed.store(true, Ordering::Relaxed);
-                        }
-                        return Vec::new();
-                    };
-                    if names.iter().any(|n| n == NOMEDIA) {
-                        return Vec::new();
-                    }
-                    let parent = dir.rsplit('/').next().unwrap_or_default();
-                    names
-                        .into_iter()
-                        .filter(|n| !skipped_name(n) && !skipped_dir(parent, n) && worth_stat(n))
-                        .map(|name| Task::Stat {
-                            url: child(&dir, &name),
-                            name,
-                        })
-                        .collect()
-                }
-                Task::Stat { url, name } => match stat(&url) {
-                    Some(st) if st.dir => vec![Task::List(url)],
-                    Some(st) if is_media(&name) => {
-                        let mut found = found.lock().unwrap();
-                        found.push(Found {
-                            location: Location::Kio(url),
-                            name,
-                            size: st.size,
-                            month: st.month,
-                        });
-                        progress(found.len());
-                        Vec::new()
-                    }
-                    _ => Vec::new(),
-                },
-            }
-        };
-        std::thread::scope(|s| {
-            for _ in 0..PARALLEL {
-                s.spawn(|| {
-                    loop {
-                        let task = {
-                            let mut st = state.lock().unwrap();
-                            loop {
-                                if cancel.load(Ordering::Relaxed) {
-                                    wake.notify_all();
-                                    return;
-                                }
-                                if let Some(task) = st.0.pop() {
-                                    st.1 += 1;
-                                    break task;
-                                }
-                                if st.1 == 0 {
-                                    wake.notify_all();
-                                    return;
-                                }
-                                // С таймаутом — чтобы заметить отмену.
-                                st = wake.wait_timeout(st, Duration::from_millis(200)).unwrap().0;
-                            }
-                        };
-                        let more = process(task);
-                        let mut st = state.lock().unwrap();
-                        st.0.extend(more);
-                        st.1 -= 1;
-                        wake.notify_all();
-                    }
-                });
-            }
-        });
-        *out = found.into_inner().unwrap();
-        if cancel.load(Ordering::Relaxed) {
-            return Err(Error::Cancelled);
-        }
-        if root_failed.load(Ordering::Relaxed) {
-            return Err(Error::Invalid(
-                "телефон не отвечает: разблокируйте его и выберите «Передача файлов»".into(),
-            ));
-        }
-        Ok(())
-    }
-
-    /// Первые `limit` байт файла с телефона (`kioclient cat`, затем процесс прерывается).
-    pub(super) fn head(url: &str, limit: usize) -> Option<Vec<u8>> {
-        let mut child = crate::sys::host_command("kioclient")
-            .args(["--noninteractive", "--platform", "offscreen", "cat", url])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .ok()?;
-        let mut out = child.stdout.take()?;
-        let reader = std::thread::spawn(move || {
-            let mut buf = Vec::with_capacity(limit);
-            let mut chunk = [0u8; 64 << 10];
-            while buf.len() < limit {
-                match out.read(&mut chunk) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
-                }
-            }
-            buf.truncate(limit);
-            buf
-        });
-        let start = Instant::now();
-        while !reader.is_finished() && start.elapsed() < Duration::from_secs(30) {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let _ = child.kill();
-        let _ = child.wait();
-        reader.join().ok().filter(|b| !b.is_empty())
-    }
-
-    /// Копия с телефона в `tmp`. KIO сохраняет время изменения. Предел времени — по размеру
-    /// (MTP не медленнее ~2 МБ/с), не меньше двух минут.
-    pub(super) fn copy(url: &str, tmp: &Path, size: u64, cancel: &AtomicBool) -> Result<()> {
-        let _ = std::fs::remove_file(tmp);
-        let limit = Duration::from_secs(120 + size / (2 << 20));
-        let dest = tmp.to_string_lossy();
-        let done = run(&["copy", url, &dest], limit, Some(cancel)).is_some();
-        if cancel.load(Ordering::Relaxed) {
-            return Err(Error::Cancelled);
-        }
-        if !done || !tmp.exists() {
-            return Err(Error::Invalid(
-                "файл не скопировался с телефона — проверьте, что он подключён и разблокирован"
-                    .into(),
-            ));
-        }
-        Ok(())
-    }
-}
+mod kio;
 
 #[cfg(test)]
 mod tests {
@@ -925,7 +770,7 @@ mod tests {
             std::slice::from_ref(&phone)
         );
         let roots = [Location::Path(phone.clone())];
-        let p = plan(&roots, &dest, &cancel, |_| {}).unwrap();
+        let p = plan(&roots, &dest, &cancel, None, |_| {}).unwrap();
         let mut names: Vec<_> = p
             .items
             .iter()
@@ -962,12 +807,12 @@ mod tests {
         }
 
         // Повторный перенос: ничего нового.
-        let again = plan(&roots, &dest, &cancel, |_| {}).unwrap();
+        let again = plan(&roots, &dest, &cancel, None, |_| {}).unwrap();
         assert_eq!((again.items.len(), again.already), (0, 2));
 
         // Другой снимок с тем же именем — рядом, с номером.
         write(&phone.join("Camera/PXL_1.jpg"), b"another photo");
-        let third = plan(&roots, &dest, &cancel, |_| {}).unwrap();
+        let third = plan(&roots, &dest, &cancel, None, |_| {}).unwrap();
         assert_eq!(third.items.len(), 1);
         assert!(
             third.items[0]
@@ -1001,11 +846,40 @@ mod tests {
         write(&storage.join("Android/data/com.app/cache/c.jpg"), b"x");
 
         let cancel = AtomicBool::new(false);
-        let mut found = Vec::new();
-        walk_local(&storage, &cancel, &mut found).unwrap();
-        let mut names: Vec<_> = found.into_iter().map(|f| f.name).collect();
+        let found = Mutex::new(Vec::new());
+        walk_local(&storage, &cancel, &|f| found.lock().unwrap().push(f.name)).unwrap();
+        let names = found.into_inner().unwrap();
+        // Камера — первой.
+        assert_eq!(names[0], "IMG_1.jpg");
+        let mut names = names;
         names.sort();
         assert_eq!(names, ["IMG-wa.jpg", "IMG_1.jpg", "tg.jpg", "vk.mp4"]);
+    }
+
+    #[test]
+    fn plan_reports_new_items_as_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let phone = dir.path().join("DCIM");
+        write(&phone.join("a.jpg"), b"1");
+        write(&phone.join("b.jpg"), b"22");
+        let dest = dir.path().join("out");
+        let roots = [Location::Path(phone)];
+        let streamed = Mutex::new(Vec::new());
+        let p = plan(&roots, &dest, &AtomicBool::new(false), None, |scan| {
+            if let Some((i, item)) = scan.new {
+                streamed.lock().unwrap().push((i, item.dest.clone()));
+            }
+        })
+        .unwrap();
+        let streamed = streamed.into_inner().unwrap();
+        let fin: Vec<_> = p
+            .items
+            .iter()
+            .enumerate()
+            .map(|(i, it)| (i, it.dest.clone()))
+            .collect();
+        // Номера и места при поиске — те же, что в готовом плане.
+        assert_eq!(streamed, fin);
     }
 
     #[cfg(target_os = "linux")]
@@ -1023,6 +897,36 @@ mod tests {
         for name in ["notes.txt", "app.apk", "song.flac", "doc.pdf"] {
             assert!(!kio::worth_stat(name), "{name}");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn batches_small_phone_files_of_one_month() {
+        let item = |url: &str, month: &str, size: u64| ImportItem {
+            source: Location::Kio(format!("mtp:/P/S/DCIM/{url}")),
+            dest: PathBuf::from(format!("/out/{month}/{}", kio::file_name(url))),
+            size,
+        };
+        let items = [
+            item("Camera/a.jpg", "2026-10", 1 << 20),
+            item("Camera/b%23.jpg", "2026-10", 1 << 20),
+            // То же имя из другой папки — в одну временную папку не положить.
+            item("Screenshots/a.jpg", "2026-10", 1 << 20),
+        ];
+        assert_eq!(kio::file_name("mtp:/P/S/DCIM/Camera/b%23.jpg"), "b#.jpg");
+        assert_eq!(kio::batch_len(&items), 2);
+        let other_month = [item("a.jpg", "2026-10", 1), item("b.jpg", "2026-09", 1)];
+        assert_eq!(kio::batch_len(&other_month), 1);
+        // Большое видео — одно: пачка ограничена по байтам, кроме первого файла.
+        let big = [
+            item("v.mp4", "2026-10", 900 << 20),
+            item("b.jpg", "2026-10", 1),
+        ];
+        assert_eq!(kio::batch_len(&big), 1);
+        let many: Vec<_> = (0..40)
+            .map(|i| item(&format!("{i}.jpg"), "2026-10", 1))
+            .collect();
+        assert_eq!(kio::batch_len(&many), 16);
     }
 
     #[cfg(target_os = "linux")]
