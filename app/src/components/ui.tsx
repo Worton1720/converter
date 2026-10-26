@@ -291,7 +291,7 @@ export function Dialog({
             </DialogPrimitive.Close>
           </div>
           <div className="min-h-0 overflow-y-auto px-6 py-5 text-[16px]">{children}</div>
-          {footer && <div className="flex flex-wrap justify-end gap-3 border-t border-line px-6 py-4">{footer}</div>}
+          {footer && <div className="flex flex-wrap items-center justify-end gap-3 border-t border-line px-6 py-4">{footer}</div>}
         </DialogPrimitive.Content>
       </DialogPrimitive.Portal>
     </DialogPrimitive.Root>
