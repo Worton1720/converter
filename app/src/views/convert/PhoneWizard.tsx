@@ -8,7 +8,7 @@ import { Button, Dialog, ProgressBar } from "../../components/ui";
 import { api } from "../../lib/api";
 import { bytes, files, plural } from "../../lib/format";
 import { useStore } from "../../lib/store";
-import type { PhonePlan, PhoneReport, PhoneSource } from "../../lib/types";
+import type { PhonePlan, PhonePlanItem, PhoneReport, PhoneScan, PhoneSource } from "../../lib/types";
 import { addPaths } from "./ConvertView";
 import { PhoneGallery } from "./PhoneGallery";
 
@@ -16,7 +16,8 @@ type Stage =
   | { kind: "search" }
   | { kind: "none" }
   | { kind: "choose"; sources: PhoneSource[] }
-  | { kind: "planning"; found: number }
+  /** `items` — новое, найденное к этому моменту: галерея наполняется по ходу поиска. */
+  | { kind: "planning"; found: number; items: PhonePlanItem[] }
   | { kind: "ready"; plan: PhonePlan }
   | { kind: "copying"; count: number; total: number; files: number; bytes: number }
   | { kind: "done"; report: PhoneReport }
@@ -41,13 +42,27 @@ export function PhoneWizard({ open: isOpen, onClose }: { open: boolean; onClose:
   const addLog = useStore((s) => s.addLog);
 
   const plan = async (index: number, folder: string) => {
-    setStage({ kind: "planning", found: 0 });
-    const un = await listen<number>("phone:scan", (e) => setStage({ kind: "planning", found: e.payload }));
+    // Новое выбрано сразу; снятое человеком во время поиска остаётся снятым.
+    let items: PhonePlanItem[] = [];
+    let finished = false;
+    setPicked(new Set());
+    setStage({ kind: "planning", found: 0, items });
+    const un = await listen<PhoneScan>("phone:scan", (e) => {
+      if (finished) return;
+      const from = items.length;
+      items = [...items, ...e.payload.items];
+      if (e.payload.items.length)
+        setPicked((prev) => new Set([...prev, ...e.payload.items.map((_, i) => from + i)]));
+      setStage({ kind: "planning", found: e.payload.seen, items });
+    });
     try {
       const p = await api.phonePlan(index, folder);
-      setPicked(new Set(p.items.map((_, i) => i)));
+      finished = true;
+      const rest = p.items.map((_, i) => i).filter((i) => i >= items.length);
+      setPicked((prev) => new Set([...prev, ...rest]));
       setStage({ kind: "ready", plan: p });
     } catch (e) {
+      finished = true;
       setStage({ kind: "error", message: String(e) });
     } finally {
       un();
@@ -112,6 +127,31 @@ export function PhoneWizard({ open: isOpen, onClose }: { open: boolean; onClose:
     onClose();
   };
 
+  /** Выбор и галерея — во время поиска и после. */
+  const gallery = (items: PhonePlanItem[]) => {
+    const pickedBytes = [...picked].reduce((sum, i) => sum + (items[i]?.size ?? 0), 0);
+    return (
+      <>
+        <div className="sticky -top-5 z-10 -mx-6 flex flex-wrap items-center gap-3 border-y border-line bg-accent-soft px-6 py-2">
+          <span className="text-[16px] font-medium">
+            Выбрано {picked.size} из {items.length} ({bytes(pickedBytes)})
+          </span>
+          <Button
+            variant="ghost"
+            disabled={picked.size === items.length}
+            onClick={() => setPicked(new Set(items.map((_, i) => i)))}
+          >
+            Выбрать все
+          </Button>
+          <Button variant="ghost" disabled={picked.size === 0} onClick={() => setPicked(new Set())}>
+            Снять все
+          </Button>
+        </div>
+        <PhoneGallery items={items} selected={picked} onChange={setPicked} />
+      </>
+    );
+  };
+
   let body: React.ReactNode;
   let footer: React.ReactNode;
   switch (stage.kind) {
@@ -161,18 +201,40 @@ export function PhoneWizard({ open: isOpen, onClose }: { open: boolean; onClose:
         </div>
       );
       break;
-    case "planning":
-      body = (
+    case "planning": {
+      const searching = (
         <p className="text-[18px] leading-relaxed">
           Смотрю, что есть на телефоне «{device?.name}»
           {stage.found > 0 && `: найдено ${stage.found} ${plural(stage.found, "снимок", "снимка", "снимков")}`}…
         </p>
       );
-      footer = <Button onClick={close}>Остановить</Button>;
+      body =
+        stage.items.length === 0 ? (
+          searching
+        ) : (
+          <div className="space-y-4 text-[18px] leading-relaxed">
+            {searching}
+            <p>
+              Новые снимки появляются ниже — уже можно нажать на ненужные, чтобы не переносить их. Перенести можно
+              будет, когда поиск закончится.
+            </p>
+            {gallery(stage.items)}
+          </div>
+        );
+      footer = (
+        <>
+          <Button onClick={close}>Остановить</Button>
+          {stage.items.length > 0 && (
+            <Button variant="primary" size="lg" disabled>
+              Перенести всё
+            </Button>
+          )}
+        </>
+      );
       break;
+    }
     case "ready": {
       const p = stage.plan;
-      const pickedBytes = [...picked].reduce((sum, i) => sum + (p.items[i]?.size ?? 0), 0);
       body = (
         <div className="space-y-4 text-[18px] leading-relaxed">
           <p>
@@ -185,27 +247,18 @@ export function PhoneWizard({ open: isOpen, onClose }: { open: boolean; onClose:
                 {p.already > 0 && ` Ещё ${files(p.already)} уже перенесено раньше, их здесь нет.`} Нажмите на снимок,
                 чтобы не переносить его.
               </p>
-              <div className="sticky -top-5 z-10 -mx-6 flex flex-wrap items-center gap-3 border-y border-line bg-accent-soft px-6 py-2">
-                <span className="text-[16px] font-medium">
-                  Выбрано {picked.size} из {p.count} ({bytes(pickedBytes)})
-                </span>
-                <Button
-                  variant="ghost"
-                  disabled={picked.size === p.count}
-                  onClick={() => setPicked(new Set(p.items.map((_, i) => i)))}
-                >
-                  Выбрать все
-                </Button>
-                <Button variant="ghost" disabled={picked.size === 0} onClick={() => setPicked(new Set())}>
-                  Снять все
-                </Button>
-              </div>
-              <PhoneGallery items={p.items} selected={picked} onChange={setPicked} />
+              {gallery(p.items)}
             </>
           ) : (
             <p>
               Всё уже перенесено: {files(p.already)} лежат на компьютере. Новых снимков на телефоне нет.
             </p>
+          )}
+          {p.unread > 0 && (
+            <div className="space-y-2 rounded-lg bg-sunken px-4 py-3">
+              <p>Часть телефона прочитать не получилось — возможно, здесь показано не всё.</p>
+              <Button onClick={() => device && dest && void plan(device.index, dest)}>Искать снова</Button>
+            </div>
           )}
           <div className="space-y-2 rounded-lg bg-sunken px-4 py-3">
             <p className="text-[16px] text-muted">Сохранить в папку (внутри — по месяцам):</p>
@@ -288,7 +341,11 @@ export function PhoneWizard({ open: isOpen, onClose }: { open: boolean; onClose:
       open={isOpen}
       onOpenChange={(v) => !v && close()}
       title="Перенести фото с телефона"
-      width={stage.kind === "ready" && stage.plan.count > 0 ? 1100 : 640}
+      width={
+        (stage.kind === "ready" && stage.plan.count > 0) || (stage.kind === "planning" && stage.items.length > 0)
+          ? 1100
+          : 640
+      }
       footer={footer}
     >
       {body}

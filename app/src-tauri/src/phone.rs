@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use converter_core::import::{self, ImportPlan, Source, SourceKind};
+use converter_core::import::{self, ImportItem, ImportPlan, Source, SourceKind};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -46,7 +46,7 @@ pub struct SourceDto {
 }
 
 /// Файл в галерее мастера; номер — индекс в плане (по нему превью и выбор).
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct PlanItemDto {
     name: String,
     size: u64,
@@ -61,6 +61,8 @@ pub struct PlanDto {
     count: usize,
     bytes: u64,
     already: usize,
+    /// Сколько папок и файлов телефон не отдал — найдено не всё.
+    unread: usize,
     photos: usize,
     videos: usize,
     items: Vec<PlanItemDto>,
@@ -76,11 +78,34 @@ pub struct ReportDto {
     cancelled: bool,
 }
 
+/// Ход поиска (`phone:scan`): сколько просмотрено и новое с прошлого события — по порядку
+/// номеров в плане.
+#[derive(Clone, Serialize)]
+struct ScanDto {
+    seen: usize,
+    items: Vec<PlanItemDto>,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Progress {
     files: usize,
     bytes: u64,
+}
+
+fn item_dto(item: &ImportItem) -> PlanItemDto {
+    let name = |p: Option<&std::path::Path>| {
+        p.and_then(|p| p.file_name())
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned()
+    };
+    PlanItemDto {
+        name: name(Some(&item.dest)),
+        size: item.size,
+        month: name(item.dest.parent()),
+        video: is_video(&item.dest),
+    }
 }
 
 fn is_video(path: &std::path::Path) -> bool {
@@ -110,7 +135,8 @@ pub async fn phone_sources(app: AppHandle) -> Result<Vec<SourceDto>, String> {
     .map_err(|e| e.to_string())
 }
 
-/// Что перенести с устройства `index` в `dest`. Прогресс просмотра — событием `phone:scan`.
+/// Что перенести с устройства `index` в `dest`. Найденное по ходу — событием `phone:scan`
+/// не чаще 5 раз в секунду (галерея наполняется, превью доступны сразу).
 #[tauri::command]
 pub async fn phone_plan(index: usize, dest: String, app: AppHandle) -> Result<PlanDto, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -123,38 +149,55 @@ pub async fn phone_plan(index: usize, dest: String, app: AppHandle) -> Result<Pl
             .cloned()
             .ok_or("устройство не найдено — подключите его заново")?;
         let cancel = phone.begin().ok_or("уже идёт перенос")?;
-        let emitter = app.clone();
-        let result = import::plan(&source.roots, &PathBuf::from(&dest), &cancel, |n| {
-            let _ = emitter.emit("phone:scan", n);
-        });
+        let remember = app
+            .state::<AppState>()
+            .settings
+            .lock()
+            .unwrap()
+            .remember_phone;
+        let memory = import::memory_path();
+        if !remember {
+            let _ = std::fs::remove_file(&memory);
+        }
+        *phone.plan.lock().unwrap() = Some(ImportPlan::default());
+        let pending = Mutex::new((Instant::now(), Vec::new()));
+        let emit = |seen: usize, items: Vec<PlanItemDto>| {
+            let _ = app.emit("phone:scan", ScanDto { seen, items });
+        };
+        let result = import::plan(
+            &source.roots,
+            &PathBuf::from(&dest),
+            &cancel,
+            remember.then_some(memory.as_path()),
+            |scan| {
+                let mut pending = pending.lock().unwrap();
+                if let Some((_, item)) = scan.new {
+                    if let Some(plan) = phone.plan.lock().unwrap().as_mut() {
+                        plan.items.push(item.clone());
+                    }
+                    pending.1.push(item_dto(item));
+                }
+                if pending.0.elapsed() >= Duration::from_millis(200) {
+                    pending.0 = Instant::now();
+                    emit(scan.seen, std::mem::take(&mut pending.1));
+                }
+            },
+        );
         phone.end();
-        let plan = result.map_err(|e| e.to_string())?;
-        let items: Vec<PlanItemDto> = plan
-            .items
-            .iter()
-            .map(|i| PlanItemDto {
-                name: i
-                    .dest
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned(),
-                size: i.size,
-                month: i
-                    .dest
-                    .parent()
-                    .and_then(|m| m.file_name())
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned(),
-                video: is_video(&i.dest),
-            })
-            .collect();
+        let plan = match result {
+            Ok(plan) => plan,
+            Err(e) => {
+                *phone.plan.lock().unwrap() = None;
+                return Err(e.to_string());
+            }
+        };
+        let items: Vec<PlanItemDto> = plan.items.iter().map(item_dto).collect();
         let videos = items.iter().filter(|i| i.video).count();
         let dto = PlanDto {
             count: plan.items.len(),
             bytes: plan.bytes,
             already: plan.already,
+            unread: plan.unread,
             photos: plan.items.len() - videos,
             videos,
             items,

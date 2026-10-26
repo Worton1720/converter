@@ -89,6 +89,8 @@ export interface Settings {
   large_text: boolean;
   limit_on_battery: boolean;
   prevent_sleep: boolean;
+  /** Запоминать сведения о файлах телефона — повторный поиск быстрее. */
+  remember_phone: boolean;
   dupes: {
     min_size: number;
     kinds: KindFilter;
@@ -288,11 +290,18 @@ export interface PhonePlanItem {
   month: string;
   video: boolean;
 }
+/** Ход поиска (`phone:scan`): просмотрено и новое с прошлого события — по порядку номеров. */
+export interface PhoneScan {
+  seen: number;
+  items: PhonePlanItem[];
+}
 export interface PhonePlan {
   count: number;
   items: PhonePlanItem[];
   bytes: number;
   already: number;
+  /** Сколько папок и файлов телефон не отдал — найдено не всё. */
+  unread: number;
   photos: number;
   videos: number;
 }

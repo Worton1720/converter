@@ -951,12 +951,21 @@ fn run_phone(args: PhoneArgs) -> anyhow::Result<ExitCode> {
     let interrupted = ctrlc_flag();
     let bar = ProgressBar::new_spinner();
     bar.enable_steady_tick(Duration::from_millis(120));
-    let plan = import::plan(&source.roots, &dest, &interrupted, |n| {
-        bar.set_message(format!(
-            "Просматриваю {}: найдено {n} фото и видео",
-            source.name
-        ))
-    });
+    let memory = converter_core::settings::Settings::load()
+        .remember_phone
+        .then(import::memory_path);
+    let plan = import::plan(
+        &source.roots,
+        &dest,
+        &interrupted,
+        memory.as_deref(),
+        |scan| {
+            bar.set_message(format!(
+                "Просматриваю {}: найдено {} фото и видео",
+                source.name, scan.seen
+            ))
+        },
+    );
     bar.finish_and_clear();
     let plan = plan?;
     println!(
@@ -965,6 +974,12 @@ fn run_phone(args: PhoneArgs) -> anyhow::Result<ExitCode> {
         human(plan.bytes),
         plan.already
     );
+    if plan.unread > 0 {
+        println!(
+            "Телефон не отдал часть папок и файлов ({}) — найдено не всё. Запустите ещё раз.",
+            plan.unread
+        );
+    }
     if args.dry_run || plan.items.is_empty() {
         return Ok(ExitCode::SUCCESS);
     }
